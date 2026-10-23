@@ -45,7 +45,7 @@ public final class BTreePartitionData
 
 
     final RegularAndStaticColumns columns;
-    final DeletionInfo deletionInfo;
+    public final DeletionInfo deletionInfo;
     // the btree of rows
     final Object[] tree;
     final Row staticRow;

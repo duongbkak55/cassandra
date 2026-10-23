@@ -102,12 +102,16 @@ public class DataComponent
                                                FlushCompression flushCompression,
                                                CompressionDictionaryManager compressionDictionaryManager)
     {
+        boolean useDirectWrite = (DatabaseDescriptor.getBackgroundWriteDiskAccessMode() == DiskAccessMode.direct
+                                  && isDirectWriteSupported(operationType))
+                                 || (org.apache.cassandra.io.sstable.format.hma.HMADirectIOEngine.instance().isDirectIOEnabled()
+                                     && isHMADirectWriteSupported(operationType));
+
         if (compression.isEnabled())
         {
             CompressionParams compressionParams = buildCompressionParams(compression, operationType, flushCompression);
 
-            if (DatabaseDescriptor.getBackgroundWriteDiskAccessMode() == DiskAccessMode.direct
-                && isDirectWriteSupported(operationType))
+            if (useDirectWrite)
             {
                 return new DirectCompressedSequentialWriter(descriptor.fileFor(Components.DATA),
                                                             descriptor.fileFor(Components.COMPRESSION_INFO),
@@ -130,6 +134,13 @@ public class DataComponent
         }
         else
         {
+            if (useDirectWrite)
+            {
+                return new org.apache.cassandra.io.util.DirectChecksummedSequentialWriter(descriptor.fileFor(Components.DATA),
+                                                                                          descriptor.fileFor(Components.CRC),
+                                                                                          descriptor.fileFor(Components.DIGEST),
+                                                                                          options);
+            }
             return new ChecksummedSequentialWriter(descriptor.fileFor(Components.DATA),
                                                    descriptor.fileFor(Components.CRC),
                                                    descriptor.fileFor(Components.DIGEST),
@@ -187,4 +198,10 @@ public class DataComponent
         return support.isSupported();
     }
 
+    static boolean isHMADirectWriteSupported(OperationType operationType)
+    {
+        if (operationType == OperationType.FLUSH)
+            return true;
+        return isDirectWriteSupported(operationType);
+    }
 }

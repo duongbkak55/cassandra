@@ -206,6 +206,8 @@ public abstract class SortedTableWriter<P extends SortedTablePartitionWriter, I 
         metadataCollector.updatePartitionDeletion(partitionLevelDeletion);
 
         onStartPartition(key);
+        if (hasObservers())
+            notifyObservers(o -> o.partitionLevelDeletion(partitionLevelDeletion));
     }
 
     private void addStaticRow(DecoratedKey key, Row row) throws IOException
@@ -283,7 +285,13 @@ public abstract class SortedTableWriter<P extends SortedTablePartitionWriter, I 
         if (logger.isTraceEnabled())
             logger.trace("wrote {} at {}", key, endPosition);
 
-        return createRowIndexEntry(key, partitionLevelDeletion, finishResult);
+        AbstractRowIndexEntry entry = createRowIndexEntry(key, partitionLevelDeletion, finishResult);
+        if (hasObservers())
+        {
+            boolean isIndexed = entry != null && entry.isIndexed();
+            notifyObservers(o -> o.endPartition(endPosition, isIndexed));
+        }
+        return entry;
     }
 
     protected void onStartPartition(DecoratedKey key)

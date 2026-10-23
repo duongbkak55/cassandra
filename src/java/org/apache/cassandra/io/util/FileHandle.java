@@ -452,9 +452,19 @@ public class FileHandle extends SharedCloseableImpl
             return complete(file -> new ChannelProxy(file, ioMode()));
         }
 
+        private DiskAccessMode effectiveDiskAccessMode()
+        {
+            if (file != null && file.name().endsWith("-Data.db")
+                && org.apache.cassandra.io.sstable.format.hma.HMADirectIOEngine.instance().isDirectIOEnabled())
+            {
+                return DiskAccessMode.direct;
+            }
+            return diskAccessMode;
+        }
+
         private ChannelProxy.IOMode ioMode()
         {
-            switch (diskAccessMode)
+            switch (effectiveDiskAccessMode())
             {
                 case mmap:
                 case standard:
@@ -481,6 +491,7 @@ public class FileHandle extends SharedCloseableImpl
             CompressionMetadata compressionMetadata = null;
             try
             {
+                DiskAccessMode effectiveAccessMode = effectiveDiskAccessMode();
                 compressionMetadata = this.compressionMetadata != null ? this.compressionMetadata.sharedCopy() : null;
                 channel = channelProxyFactory.apply(file);
 
@@ -492,7 +503,7 @@ public class FileHandle extends SharedCloseableImpl
                 {
                     rebuffererFactory = new EmptyRebufferer(channel);
                 }
-                else if (DiskAccessMode.mmap == diskAccessMode)
+                else if (DiskAccessMode.mmap == effectiveAccessMode)
                 {
                     if (compressionMetadata != null)
                     {
@@ -512,7 +523,7 @@ public class FileHandle extends SharedCloseableImpl
                     if (compressionMetadata != null)
                     {
                         final CompressedChunkReader compressedChunkReader;
-                        if (DiskAccessMode.direct == diskAccessMode)
+                        if (DiskAccessMode.direct == effectiveAccessMode)
                         {
                             compressedChunkReader = new CompressedChunkReader.Direct(channel, compressionMetadata, crcCheckChanceSupplier);
                         }
@@ -525,12 +536,19 @@ public class FileHandle extends SharedCloseableImpl
                     else
                     {
                         int chunkSize = DiskOptimizationStrategy.roundForCaching(bufferSize, ChunkCache.roundUp);
-                        rebuffererFactory = maybeCached(new SimpleChunkReader(channel, length, bufferType, chunkSize));
+                        if (DiskAccessMode.direct == effectiveAccessMode)
+                        {
+                            rebuffererFactory = maybeCached(new SimpleChunkReader.Direct(channel, length, bufferType, chunkSize));
+                        }
+                        else
+                        {
+                            rebuffererFactory = maybeCached(new SimpleChunkReader(channel, length, bufferType, chunkSize));
+                        }
                     }
                 }
 
                 Cleanup cleanup = new Cleanup(channel, rebuffererFactory, compressionMetadata, chunkCache);
-                return new FileHandle(cleanup, channel, rebuffererFactory, compressionMetadata, length, diskAccessMode, chunkCache,
+                return new FileHandle(cleanup, channel, rebuffererFactory, compressionMetadata, length, effectiveAccessMode, chunkCache,
                                       mmappedRegionsCache, crcCheckChanceSupplier, lengthOverride, bufferSize, bufferType);
             }
             catch (Throwable t)

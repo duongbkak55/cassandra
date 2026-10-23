@@ -23,8 +23,10 @@ import java.nio.ByteOrder;
 import net.nicoulaj.compilecommand.annotations.Inline;
 
 import org.apache.cassandra.dht.Token;
+import org.apache.cassandra.utils.FastByteOperations;
 import org.apache.cassandra.utils.bytecomparable.ByteSource;
 import org.apache.cassandra.utils.concurrent.OpOrder;
+import org.apache.cassandra.utils.memory.AddressBasedAllocator;
 import org.apache.cassandra.utils.memory.MemoryUtil;
 import org.apache.cassandra.utils.memory.NativeAllocator;
 import org.apache.cassandra.utils.memory.NativeEndianMemoryUtil;
@@ -34,6 +36,11 @@ public class NativeDecoratedKey extends DecoratedKey
     final long peer;
 
     public NativeDecoratedKey(Token token, NativeAllocator allocator, OpOrder.Group writeOp, ByteBuffer key)
+    {
+        this(token, (AddressBasedAllocator) allocator, writeOp, key);
+    }
+
+    public NativeDecoratedKey(Token token, AddressBasedAllocator allocator, OpOrder.Group writeOp, ByteBuffer key)
     {
         super(token);
         assert key != null;
@@ -46,6 +53,11 @@ public class NativeDecoratedKey extends DecoratedKey
     }
 
     public NativeDecoratedKey(Token token, NativeAllocator allocator, OpOrder.Group writeOp, byte[] keyBytes)
+    {
+        this(token, (AddressBasedAllocator) allocator, writeOp, keyBytes);
+    }
+
+    public NativeDecoratedKey(Token token, AddressBasedAllocator allocator, OpOrder.Group writeOp, byte[] keyBytes)
     {
         super(token);
         assert keyBytes != null;
@@ -78,6 +90,52 @@ public class NativeDecoratedKey extends DecoratedKey
     public int getKeyLength()
     {
         return NativeEndianMemoryUtil.getInt(peer);
+    }
+
+    @Override
+    public int hashCode()
+    {
+        long addr = address();
+        int len = length();
+        int h = 1;
+        for (int i = len - 1; i >= 0; i--)
+            h = 31 * h + (int) MemoryUtil.getByte(addr + i);
+        return h;
+    }
+
+    @Override
+    public boolean equals(Object obj)
+    {
+        if (this == obj)
+            return true;
+        if (!(obj instanceof DecoratedKey))
+            return false;
+        return compareBytesOnly((DecoratedKey) obj) == 0;
+    }
+
+    @Override
+    public int compareTo(PartitionPosition pos)
+    {
+        if (this == pos)
+            return 0;
+        if (!(pos instanceof DecoratedKey))
+            return -pos.compareTo(this);
+        DecoratedKey otherKey = (DecoratedKey) pos;
+        int cmp = getToken().compareTo(otherKey.getToken());
+        return cmp == 0 ? compareBytesOnly(otherKey) : cmp;
+    }
+
+    @Override
+    public int compareBytesOnly(DecoratedKey that)
+    {
+        if (this == that)
+            return 0;
+        if (that instanceof NativeDecoratedKey)
+        {
+            NativeDecoratedKey other = (NativeDecoratedKey) that;
+            return FastByteOperations.compareMemoryUnsigned(address(), length(), other.address(), other.length());
+        }
+        return -FastByteOperations.compareWithMemoryUnsigned(that.getKey(), address(), length());
     }
 
     @Override

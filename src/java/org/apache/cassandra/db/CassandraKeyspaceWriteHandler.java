@@ -66,12 +66,16 @@ public class CassandraKeyspaceWriteHandler implements KeyspaceWriteHandler
 
     private CommitLogPosition addToCommitLog(Mutation mutation)
     {
+        if (org.apache.cassandra.io.sstable.format.hma.HMAWriteBufferManager.instance().shouldBypassCommitLog(mutation))
+            return null;
+
         // Usually one of these will be true, so first check if that's the case.
         boolean allSkipCommitlog = true;
         boolean noneSkipCommitlog = true;
         for (PartitionUpdate update : mutation.getPartitionUpdates())
         {
-            if (update.metadata().params.memtable.factory().writesShouldSkipCommitLog())
+            if (update.metadata().params.memtable.factory().writesShouldSkipCommitLog()
+                || org.apache.cassandra.io.sstable.format.hma.HMAWriteBufferManager.instance().isSingleWriteEnabled(update.metadata()))
                 noneSkipCommitlog = false;
             else
                 allSkipCommitlog = false;
@@ -86,7 +90,8 @@ public class CassandraKeyspaceWriteHandler implements KeyspaceWriteHandler
                 Set<TableId> ids = new HashSet<>();
                 for (PartitionUpdate update : mutation.getPartitionUpdates())
                 {
-                    if (!update.metadata().params.memtable.factory().writesShouldSkipCommitLog())
+                    if (!update.metadata().params.memtable.factory().writesShouldSkipCommitLog()
+                        && !org.apache.cassandra.io.sstable.format.hma.HMAWriteBufferManager.instance().isSingleWriteEnabled(update.metadata()))
                         ids.add(update.metadata().id);
                 }
                 mutation = mutation.filter(ids::contains);

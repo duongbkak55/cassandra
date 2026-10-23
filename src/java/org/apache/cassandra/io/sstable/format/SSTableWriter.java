@@ -54,6 +54,8 @@ import org.apache.cassandra.io.sstable.SSTable;
 import org.apache.cassandra.io.sstable.SSTableFlushObserver;
 import org.apache.cassandra.io.sstable.SSTableZeroCopyWriter;
 import org.apache.cassandra.io.sstable.format.SSTableFormat.Components;
+import org.apache.cassandra.io.sstable.format.hma.HMAFlushObserver;
+import org.apache.cassandra.io.sstable.format.hma.HMAPrimaryIndexManager;
 import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
 import org.apache.cassandra.io.sstable.metadata.MetadataComponent;
 import org.apache.cassandra.io.sstable.metadata.MetadataType;
@@ -135,6 +137,12 @@ public abstract class SSTableWriter extends SSTable implements Transactional
                     observer.begin();
                     observers.add(observer);
                 }
+            }
+            if (HMAPrimaryIndexManager.instance().isEnabled(metadata.getLocal()))
+            {
+                HMAFlushObserver hmaObserver = new HMAFlushObserver(metadata.getLocal(), descriptor);
+                hmaObserver.begin();
+                observers.add(hmaObserver);
             }
         }
         catch (RuntimeException | IOError ex)

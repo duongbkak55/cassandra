@@ -35,6 +35,7 @@ import org.slf4j.LoggerFactory;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.InheritingClass;
 import org.apache.cassandra.config.ParameterizedClass;
+import org.apache.cassandra.db.memtable.HMAOffHeapMemtableFactory;
 import org.apache.cassandra.db.memtable.Memtable;
 import org.apache.cassandra.db.memtable.SkipListMemtableFactory;
 import org.apache.cassandra.exceptions.ConfigurationException;
@@ -209,7 +210,11 @@ public final class MemtableParams
         ParameterizedClass definition = CONFIGURATION_DEFINITIONS.get(configurationKey);
 
         if (definition == null)
+        {
+            if (HMAOffHeapMemtableFactory.CONFIGURATION_KEY.equals(configurationKey))
+                return new MemtableParams(HMAOffHeapMemtableFactory.INSTANCE, configurationKey);
             throw new ConfigurationException("Memtable configuration \"" + configurationKey + "\" not found.");
+        }
         return new MemtableParams(getMemtableFactory(definition), configurationKey);
     }
 

@@ -53,6 +53,9 @@ import org.apache.cassandra.io.sstable.SSTableReadsListener;
 import org.apache.cassandra.io.sstable.SSTableReadsListener.SelectionReason;
 import org.apache.cassandra.io.sstable.SSTableReadsListener.SkippingReason;
 import org.apache.cassandra.io.sstable.format.SSTableReaderWithFilter;
+import org.apache.cassandra.io.sstable.format.hma.HMAPrimaryIndex;
+import org.apache.cassandra.io.sstable.format.hma.HMAPrimaryIndexManager;
+import org.apache.cassandra.io.sstable.format.hma.HMARecordPointer;
 import org.apache.cassandra.io.util.FileDataInput;
 import org.apache.cassandra.io.util.FileHandle;
 import org.apache.cassandra.io.util.FileUtils;
@@ -74,14 +77,18 @@ import static org.apache.cassandra.utils.concurrent.SharedCloseable.sharedCopyOr
  */
 public class BtiTableReader extends SSTableReaderWithFilter
 {
+    private static final ThreadLocal<HMARecordPointer> HMA_POINTER_TL = ThreadLocal.withInitial(HMARecordPointer::new);
+
     private final FileHandle rowIndexFile;
     private final PartitionIndex partitionIndex;
+    private final long hmaSSTableId;
 
     public BtiTableReader(Builder builder, SSTable.Owner owner)
     {
         super(builder, owner);
         this.rowIndexFile = builder.getRowIndexFile();
         this.partitionIndex = builder.getPartitionIndex();
+        this.hmaSSTableId = HMARecordPointer.resolveSSTableId(this.descriptor);
     }
 
     protected final Builder unbuildTo(Builder builder, boolean sharedCopy)
@@ -287,6 +294,55 @@ public class BtiTableReader extends SSTableReaderWithFilter
         {
             notifySkipped(SkippingReason.MIN_MAX_KEYS, listener, EQ, updateStats);
             return ExactPosition.NOT_FOUND;
+        }
+
+        HMAPrimaryIndex hmaIndex = HMAPrimaryIndexManager.instance().get(metadata().id);
+        if (hmaIndex != null)
+        {
+            HMARecordPointer ptr = HMA_POINTER_TL.get();
+            if (hmaIndex.lookup(dk, ptr))
+            {
+                if (ptr.sstableId == hmaSSTableId || (ptr.baseSstableId > 0 && ptr.baseSstableId == hmaSSTableId))
+                {
+                    long directOffset = (ptr.sstableId == hmaSSTableId) ? ptr.dataOffset : ptr.baseDataOffset;
+                    boolean canDirectJump = (ptr.sstableId == hmaSSTableId) ? (!ptr.isMultiBlock() && directOffset >= 0) : (directOffset >= 0);
+                    if (canDirectJump)
+                    {
+                        try
+                        {
+                            FileDataInput in = dfile.createReader(directOffset);
+                            boolean handedOver = false;
+                            try
+                            {
+                                if (ByteBufferUtil.equalsWithShortLength(in, dk.getKey()))
+                                {
+                                    hmaIndex.recordDirectReadBypass();
+                                    TrieIndexEntry rie = new TrieIndexEntry(directOffset);
+                                    notifySelected(SelectionReason.INDEX_ENTRY_FOUND, listener, EQ, updateStats, rie);
+                                    handedOver = retainDataInput;
+                                    return new ExactPosition(rie, retainDataInput ? in : null);
+                                }
+                            }
+                            finally
+                            {
+                                if (!handedOver)
+                                    in.close();
+                            }
+                        }
+                        catch (IOException e)
+                        {
+                            markSuspect();
+                            throw new CorruptSSTableException(e, dfile.path());
+                        }
+                    }
+                }
+                else if (!ptr.isMultiSSTable())
+                {
+                    hmaIndex.recordDirectReadBypass();
+                    notifySkipped(SkippingReason.BLOOM_FILTER, listener, EQ, updateStats);
+                    return ExactPosition.NOT_FOUND;
+                }
+            }
         }
 
         if (!isPresentInFilter(dk))

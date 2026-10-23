@@ -41,8 +41,8 @@ public class BTreePartitionUpdater implements UpdateFunction<Row, Row>, ColumnDa
     final MemtableAllocator allocator;
     final OpOrder.Group writeOp;
 
-    final Cloner cloner;
-    Cloner contextCloner;
+    protected final Cloner cloner;
+    protected Cloner contextCloner;
     final UpdateTransaction indexer;
     public long dataSize;
 

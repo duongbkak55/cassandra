@@ -72,4 +72,25 @@ class SimpleChunkReader extends AbstractReaderFileProxy implements ChunkReader
                              bufferSize,
                              fileLength());
     }
+
+    static class Direct extends SimpleChunkReader
+    {
+        private final int blockSize;
+
+        Direct(ChannelProxy channel, long fileLength, BufferType bufferType, int bufferSize)
+        {
+            super(channel, fileLength, BufferType.OFF_HEAP, bufferSize);
+            this.blockSize = org.apache.cassandra.io.sstable.format.hma.HMADirectIOEngine.instance()
+                                                                                         .resolveBlockSize(new File(channel.filePath()));
+        }
+
+        @Override
+        public void readChunk(long position, ByteBuffer buffer)
+        {
+            buffer.clear();
+            org.apache.cassandra.io.sstable.format.hma.HMADirectIOEngine.instance()
+                                                                        .readAlignedChunk(channel, position, buffer, blockSize);
+            buffer.flip();
+        }
+    }
 }

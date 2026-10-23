@@ -18,6 +18,7 @@
 package org.apache.cassandra.io.sstable;
 
 import org.apache.cassandra.db.DecoratedKey;
+import org.apache.cassandra.db.DeletionTime;
 import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.rows.Unfiltered;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
@@ -44,6 +45,21 @@ public interface SSTableFlushObserver
      *                           position as expected by {@link SSTableReader#keyAtPositionFromSecondaryIndex(long)}.
      */
     void startPartition(DecoratedKey key, long keyPosition, long keyPositionForSASI);
+
+    /**
+     * Called with the partition-level deletion time after {@link #startPartition(DecoratedKey, long, long)}.
+     *
+     * @param deletionTime partition-level deletion time
+     */
+    default void partitionLevelDeletion(DeletionTime deletionTime) {}
+
+    /**
+     * Called when a partition has been completely written to the SSTable data file.
+     *
+     * @param endPosition byte position in the SSTable data file after finishing the partition
+     * @param isIndexed   true if the partition spans multiple column index blocks
+     */
+    default void endPartition(long endPosition, boolean isIndexed) {}
 
     /**
      * Called when a static row is being written to the sstable. If static columns are present in the table, it is called

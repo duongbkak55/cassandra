@@ -58,7 +58,7 @@ public final class ChannelProxy extends SharedCloseableImpl
     {
         try
         {
-            return FileChannel.open(file.toPath(), openOptions);
+            return org.apache.cassandra.io.sstable.format.hma.HMADirectIOEngine.openReadChannelWithFallback(file, openOptions);
         }
         catch (IOException e)
         {

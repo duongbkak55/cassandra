@@ -52,6 +52,14 @@ public interface KeyReader extends Closeable
     long dataPosition();
 
     /**
+     * Returns true if the current partition is a multi-block indexed partition (requiring a row index lookup).
+     */
+    default boolean isIndexed()
+    {
+        return false;
+    }
+
+    /**
      * Moves the iterator forward. Returns false if we reach EOF and there nothing more to read
      */
     boolean advance() throws IOException;

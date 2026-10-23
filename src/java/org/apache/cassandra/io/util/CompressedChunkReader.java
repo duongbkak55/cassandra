@@ -146,7 +146,9 @@ public abstract class CompressedChunkReader extends AbstractReaderFileProxy impl
             int delta = (int) (chunk.offset - alignedPos);
 
             ByteBuffer buffer = bufferHolder.getBuffer(length + delta);
-            if (channel.read(buffer, alignedPos) < length + delta)
+            int rawBytesRead = channel.read(buffer, alignedPos);
+            org.apache.cassandra.io.sstable.format.hma.HMADirectIOEngine.instance().recordDirectRead(Math.max(0, rawBytesRead));
+            if (rawBytesRead < length + delta)
                 throw new CorruptBlockException(channel.filePath(), chunk);
 
             buffer.position(delta);

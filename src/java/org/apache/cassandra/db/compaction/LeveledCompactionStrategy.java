@@ -53,6 +53,8 @@ import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.io.sstable.ISSTableScanner;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.io.sstable.format.hma.HMAPrimaryIndex;
+import org.apache.cassandra.io.sstable.format.hma.HMAPrimaryIndexManager;
 import org.apache.cassandra.io.sstable.metadata.StatsMetadata;
 import org.apache.cassandra.schema.CompactionParams;
 import org.apache.cassandra.schema.TableMetadata;
@@ -148,6 +150,22 @@ public class LeveledCompactionStrategy extends AbstractCompactionStrategy
         Collection<SSTableReader> previousCandidate = null;
         while (true)
         {
+            if (HMABlockCompactionStrategy.isDefragEnabled(cfs.metadata()))
+            {
+                HMAPrimaryIndex index = HMAPrimaryIndexManager.instance().get(cfs.metadata().id);
+                int lwmPct = index != null ? index.getDefragLwmPct() : HMAPrimaryIndex.DEFAULT_DEFRAG_LWM_PCT;
+                List<SSTableReader> defragCandidates = HMABlockCompactionStrategy.findDefragCandidates(
+                    cfs, filterSuspectSSTables(manifest.getSSTables()), lwmPct, cfs.getMaximumCompactionThreshold());
+                if (!defragCandidates.isEmpty() && !defragCandidates.equals(previousCandidate))
+                {
+                    LifecycleTransaction defragTxn = cfs.getTracker().tryModify(defragCandidates, OperationType.COMPACTION);
+                    if (defragTxn != null)
+                        return Collections.singletonList(new HMABlockDefragTask(cfs, defragTxn, gcBefore, false));
+                    previousCandidate = defragCandidates;
+                    continue;
+                }
+            }
+
             OperationType op;
             LeveledManifest.CompactionCandidate candidate = manifest.getCompactionCandidates();
             if (candidate == null)
@@ -202,6 +220,18 @@ public class LeveledCompactionStrategy extends AbstractCompactionStrategy
         Iterable<SSTableReader> filteredSSTables = filterSuspectSSTables(sstables);
         if (Iterables.isEmpty(sstables))
             return null;
+        if (HMABlockCompactionStrategy.isDefragEnabled(cfs.metadata()) && !splitOutput)
+        {
+            HMAPrimaryIndex index = HMAPrimaryIndexManager.instance().get(cfs.metadata().id);
+            int lwmPct = index != null ? index.getDefragLwmPct() : HMAPrimaryIndex.DEFAULT_DEFRAG_LWM_PCT;
+            List<SSTableReader> defragCandidates = HMABlockCompactionStrategy.findDefragCandidates(
+                cfs, filteredSSTables, lwmPct, Integer.MAX_VALUE);
+            Iterable<SSTableReader> target = !defragCandidates.isEmpty() ? defragCandidates : filteredSSTables;
+            LifecycleTransaction txn = cfs.getTracker().tryModify(target, OperationType.COMPACTION);
+            if (txn == null)
+                return null;
+            return Arrays.<AbstractCompactionTask>asList(new HMABlockDefragTask(cfs, txn, gcBefore, false));
+        }
         LifecycleTransaction txn = cfs.getTracker().tryModify(filteredSSTables, OperationType.COMPACTION);
         if (txn == null)
             return null;

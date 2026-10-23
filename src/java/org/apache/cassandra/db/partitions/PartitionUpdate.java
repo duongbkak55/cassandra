@@ -454,7 +454,8 @@ public class PartitionUpdate extends AbstractBTreePartition
         return holder.columns;
     }
 
-    protected BTreePartitionData holder()
+    @Override
+    public BTreePartitionData holder()
     {
         return holder;
     }

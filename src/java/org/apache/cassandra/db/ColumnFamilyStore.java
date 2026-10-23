@@ -128,6 +128,7 @@ import org.apache.cassandra.io.sstable.format.SSTableFormat;
 import org.apache.cassandra.io.sstable.format.SSTableFormat.Components;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.Version;
+import org.apache.cassandra.io.sstable.format.hma.HMAPrimaryIndexManager;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.metrics.Sampler;
 import org.apache.cassandra.metrics.Sampler.Sample;
@@ -401,7 +402,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean, Memtable.Owner
 
         indexManager.reload(tableMetadata);
 
-        memtableFactory = tableMetadata.params.memtable.factory();
+        memtableFactory = org.apache.cassandra.db.memtable.HMAOffHeapMemtableFactory.resolveFactory(tableMetadata);
         if (DatabaseDescriptor.isDaemonInitialized())
             switchMemtableOrNotify(FlushReason.SCHEMA_CHANGE, tableMetadata, Memtable::metadataUpdated);
     }
@@ -521,7 +522,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean, Memtable.Owner
         this.sstableIdGenerator = sstableIdGenerator;
         sampleReadLatencyMicros = DatabaseDescriptor.getReadRpcTimeout(TimeUnit.MICROSECONDS) / 2;
         additionalWriteLatencyMicros = DatabaseDescriptor.getWriteRpcTimeout(TimeUnit.MICROSECONDS) / 2;
-        memtableFactory = initMetadata.params.memtable.factory();
+        memtableFactory = org.apache.cassandra.db.memtable.HMAOffHeapMemtableFactory.resolveFactory(initMetadata);
 
         logger.info("Initializing {}.{}", getKeyspaceName(), name);
 
@@ -549,6 +550,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean, Memtable.Owner
             Directories.SSTableLister sstableFiles = directories.sstableLister(Directories.OnTxnErr.IGNORE).skipTemporary(true);
             sstables = SSTableReader.openAll(this, sstableFiles.list().entrySet(), metadata);
             data.addInitialSSTablesWithoutUpdatingSize(sstables);
+            HMAPrimaryIndexManager.instance().populateFromSSTables(initMetadata, sstables);
         }
 
         // compaction strategy should be created after the CFS has been prepared
@@ -752,6 +754,8 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean, Memtable.Owner
         indexManager.dropAllIndexes(dropData);
 
         invalidateCaches();
+        if (!metadata.get().isIndex())
+            HMAPrimaryIndexManager.instance().remove(metadata.id);
         if (topPartitions != null)
             topPartitions.close();
 
@@ -1079,6 +1083,9 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean, Memtable.Owner
     @VisibleForTesting
     public Future<CommitLogPosition> switchMemtable(FlushReason reason)
     {
+        if (org.apache.cassandra.io.sstable.format.hma.HMAWriteBufferManager.instance().isSingleWriteEnabled(metadata()))
+            org.apache.cassandra.io.sstable.format.hma.HMAWriteBufferManager.instance().flushTable(this);
+
         synchronized (data)
         {
             logFlush(reason);
@@ -1525,24 +1532,31 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean, Memtable.Owner
         CommitLogPosition commitLogPosition = context.getPosition();
         try
         {
-            Memtable mt = data.getMemtableFor(opGroup, commitLogPosition);
-            UpdateTransaction indexer = newUpdateTransaction(update, context, updateIndexes, mt);
-            long timeDelta;
-            // Nesting is tracked on the context; updateIndexes cannot identify it, as index build and compaction cleanup also pass false. See Memtable#checkSpaceAndPut.
-            if (context.enterMemtableWrite())
+            long timeDelta = Long.MAX_VALUE;
+            if (org.apache.cassandra.io.sstable.format.hma.HMAWriteBufferManager.instance().isSingleWriteEnabled(metadata()))
             {
-                try
-                {
-                    timeDelta = mt.checkSpaceAndPut(update, indexer, opGroup);
-                }
-                finally
-                {
-                    context.exitMemtableWrite();
-                }
+                org.apache.cassandra.io.sstable.format.hma.HMAWriteBufferManager.instance().write(this, update);
             }
             else
             {
-                timeDelta = mt.put(update, indexer, opGroup);
+                Memtable mt = data.getMemtableFor(opGroup, commitLogPosition);
+                UpdateTransaction indexer = newUpdateTransaction(update, context, updateIndexes, mt);
+                // Nesting is tracked on the context; updateIndexes cannot identify it, as index build and compaction cleanup also pass false. See Memtable#checkSpaceAndPut.
+                if (context.enterMemtableWrite())
+                {
+                    try
+                    {
+                        timeDelta = mt.checkSpaceAndPut(update, indexer, opGroup);
+                    }
+                    finally
+                    {
+                        context.exitMemtableWrite();
+                    }
+                }
+                else
+                {
+                    timeDelta = mt.put(update, indexer, opGroup);
+                }
             }
             DecoratedKey key = update.partitionKey();
             invalidateCachedPartition(key);

@@ -43,6 +43,8 @@ import org.apache.cassandra.db.compaction.writers.SplittingSizeTieredCompactionW
 import org.apache.cassandra.db.lifecycle.ILifecycleTransaction;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.io.sstable.format.hma.HMAPrimaryIndex;
+import org.apache.cassandra.io.sstable.format.hma.HMAPrimaryIndexManager;
 import org.apache.cassandra.schema.CompactionParams;
 import org.apache.cassandra.utils.Pair;
 
@@ -93,6 +95,25 @@ public class SizeTieredCompactionStrategy extends AbstractCompactionStrategy
         int maxThreshold = cfs.getMaximumCompactionThreshold();
 
         Iterable<SSTableReader> candidates = filterSuspectSSTables(filter(cfs.getUncompactingSSTables(), sstables::contains));
+
+        // Aerospike-style HMA Block-Level Defragmentation priority path:
+        // First reclaim SSTables whose live byte utilization (inuse_sz) has fallen below defrag_lwm_pct.
+        if (HMABlockCompactionStrategy.isDefragEnabled(cfs.metadata()))
+        {
+            HMAPrimaryIndex index = HMAPrimaryIndexManager.instance().get(cfs.metadata().id);
+            int lwmPct = index != null ? index.getDefragLwmPct() : HMAPrimaryIndex.DEFAULT_DEFRAG_LWM_PCT;
+            List<SSTableReader> defragCandidates = HMABlockCompactionStrategy.findDefragCandidates(cfs, candidates, lwmPct, maxThreshold);
+            if (!defragCandidates.isEmpty())
+            {
+                estimatedRemainingTasks = 1;
+                return defragCandidates;
+            }
+            if (HMABlockCompactionStrategy.shouldReplaceSTCSMerge())
+            {
+                estimatedRemainingTasks = 0;
+                return Collections.emptyList();
+            }
+        }
 
         List<List<SSTableReader>> buckets = getBuckets(createSSTableAndLengthPairs(candidates), sizeTieredOptions.bucketHigh, sizeTieredOptions.bucketLow, sizeTieredOptions.minSSTableSize);
         logger.trace("Compaction buckets are {}", buckets);
@@ -207,7 +228,11 @@ public class SizeTieredCompactionStrategy extends AbstractCompactionStrategy
 
             ILifecycleTransaction transaction = cfs.getTracker().tryModify(hottestBucket, OperationType.COMPACTION);
             if (transaction != null)
+            {
+                if (HMABlockCompactionStrategy.isDefragEnabled(cfs.metadata()))
+                    return Collections.singletonList(new HMABlockDefragTask(cfs, transaction, gcBefore, false));
                 return Collections.singletonList(new CompactionTask(cfs, transaction, gcBefore));
+            }
             previousCandidate = hottestBucket;
         }
     }
@@ -222,6 +247,8 @@ public class SizeTieredCompactionStrategy extends AbstractCompactionStrategy
             return null;
         if (splitOutput)
             return Arrays.<AbstractCompactionTask>asList(new SplittingCompactionTask(cfs, txn, gcBefore));
+        if (HMABlockCompactionStrategy.isDefragEnabled(cfs.metadata()))
+            return Arrays.<AbstractCompactionTask>asList(new HMABlockDefragTask(cfs, txn, gcBefore, false));
         return Arrays.<AbstractCompactionTask>asList(new CompactionTask(cfs, txn, gcBefore));
     }
 
@@ -236,6 +263,8 @@ public class SizeTieredCompactionStrategy extends AbstractCompactionStrategy
             return null;
         }
 
+        if (HMABlockCompactionStrategy.isDefragEnabled(cfs.metadata()))
+            return new HMABlockDefragTask(cfs, transaction, gcBefore, false).setUserDefined(true);
         return new CompactionTask(cfs, transaction, gcBefore).setUserDefined(true);
     }
 

@@ -263,7 +263,10 @@ public abstract class AbstractCompactionStrategy
         try
         {
             for (SSTableReader sstable : sstables)
-                scanners.add(sstable.getScanner(ranges, DatabaseDescriptor.getCompactionReadDiskAccessMode()));
+            {
+                ISSTableScanner rawScanner = sstable.getScanner(ranges, DatabaseDescriptor.getCompactionReadDiskAccessMode());
+                scanners.add(HMABlockDefragTask.maybeWrapScanner(cfs, sstable, rawScanner));
+            }
         }
         catch (Throwable t)
         {

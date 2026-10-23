@@ -66,6 +66,9 @@ import org.apache.cassandra.io.sstable.SSTableReadsListener.SkippingReason;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.SSTableReaderWithFilter;
 import org.apache.cassandra.io.sstable.format.big.BigFormat.Components;
+import org.apache.cassandra.io.sstable.format.hma.HMAPrimaryIndex;
+import org.apache.cassandra.io.sstable.format.hma.HMAPrimaryIndexManager;
+import org.apache.cassandra.io.sstable.format.hma.HMARecordPointer;
 import org.apache.cassandra.io.sstable.indexsummary.IndexSummary;
 import org.apache.cassandra.io.sstable.indexsummary.IndexSummaryBuilder;
 import org.apache.cassandra.io.sstable.indexsummary.IndexSummarySupport;
@@ -90,12 +93,14 @@ public class BigTableReader extends SSTableReaderWithFilter implements IndexSumm
                                                                        KeyCacheSupport<BigTableReader>
 {
     private static final Logger logger = LoggerFactory.getLogger(BigTableReader.class);
+    private static final ThreadLocal<HMARecordPointer> HMA_POINTER_TL = ThreadLocal.withInitial(HMARecordPointer::new);
 
     private final RowIndexEntry.IndexSerializer rowIndexEntrySerializer;
     private final IndexSummary indexSummary;
     private final FileHandle ifile;
 
     private final KeyCache keyCache;
+    private final long hmaSSTableId;
 
     public BigTableReader(Builder builder, SSTable.Owner owner)
     {
@@ -104,6 +109,7 @@ public class BigTableReader extends SSTableReaderWithFilter implements IndexSumm
         this.indexSummary = builder.getIndexSummary();
         this.rowIndexEntrySerializer = new RowIndexEntry.Serializer(descriptor.version, header, owner != null ? owner.getMetrics() : null);
         this.keyCache = Objects.requireNonNull(builder.getKeyCache());
+        this.hmaSSTableId = HMARecordPointer.resolveSSTableId(this.descriptor);
     }
 
     @Override
@@ -291,6 +297,38 @@ public class BigTableReader extends SSTableReaderWithFilter implements IndexSumm
         if (searchOp == Operator.EQ)
         {
             assert key instanceof DecoratedKey; // EQ only make sense if the key is a valid row key
+            DecoratedKey decoratedKey = (DecoratedKey) key;
+            HMAPrimaryIndex hmaIndex = HMAPrimaryIndexManager.instance().get(metadata().id);
+            if (hmaIndex != null)
+            {
+                HMARecordPointer ptr = HMA_POINTER_TL.get();
+                if (hmaIndex.lookup(decoratedKey, ptr))
+                {
+                    if (ptr.sstableId == hmaSSTableId)
+                    {
+                        if (!ptr.isMultiBlock() && ptr.dataOffset >= 0)
+                        {
+                            hmaIndex.recordDirectReadBypass();
+                            RowIndexEntry indexEntry = new RowIndexEntry(ptr.dataOffset);
+                            notifySelected(SelectionReason.INDEX_ENTRY_FOUND, listener, operator, updateStats, indexEntry);
+                            return indexEntry;
+                        }
+                    }
+                    else if (ptr.baseSstableId > 0 && ptr.baseSstableId == hmaSSTableId && ptr.baseDataOffset >= 0)
+                    {
+                        hmaIndex.recordDirectReadBypass();
+                        RowIndexEntry indexEntry = new RowIndexEntry(ptr.baseDataOffset);
+                        notifySelected(SelectionReason.INDEX_ENTRY_FOUND, listener, operator, updateStats, indexEntry);
+                        return indexEntry;
+                    }
+                    else if (!ptr.isMultiSSTable())
+                    {
+                        hmaIndex.recordDirectReadBypass();
+                        notifySkipped(SkippingReason.BLOOM_FILTER, listener, operator, updateStats);
+                        return null;
+                    }
+                }
+            }
             if (!isPresentInFilter((IFilter.FilterKey) key))
             {
                 notifySkipped(SkippingReason.BLOOM_FILTER, listener, operator, updateStats);

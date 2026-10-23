@@ -272,6 +272,7 @@ public class DirectCompressedSequentialWriter extends CompressedSequentialWriter
         writeBuffer.limit(flushLimit);
         while (writeBuffer.hasRemaining())
             fchannel.write(writeBuffer);
+        org.apache.cassandra.io.sstable.format.hma.HMADirectIOEngine.instance().recordDirectWrite(flushLimit);
     }
 
     private void flushCompleteBlocks()

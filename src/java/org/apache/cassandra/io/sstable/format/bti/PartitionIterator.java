@@ -164,6 +164,12 @@ class PartitionIterator extends PartitionIndex.IndexPosIterator implements KeyRe
     }
 
     @Override
+    public boolean isIndexed()
+    {
+        return currentEntry != null && currentEntry.isIndexed();
+    }
+
+    @Override
     public long keyPositionForSecondaryIndex()
     {
         return dataPosition();

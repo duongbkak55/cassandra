@@ -38,6 +38,7 @@ import org.apache.cassandra.utils.SearchIterator;
 public abstract class EnsureOnHeap extends Transformation
 {
     public static final EnsureOnHeap NOOP = new NoOp();
+    public static final EnsureOnHeap CLONE_TO_HEAP = new CloneToHeap();
 
     public abstract DecoratedKey applyToPartitionKey(DecoratedKey key);
     public abstract UnfilteredRowIterator applyToPartition(UnfilteredRowIterator partition);
@@ -48,7 +49,7 @@ public abstract class EnsureOnHeap extends Transformation
     public abstract Row applyToStatic(Row row);
     public abstract RangeTombstoneMarker applyToMarker(RangeTombstoneMarker marker);
 
-    static class CloneToHeap extends EnsureOnHeap
+    public static class CloneToHeap extends EnsureOnHeap
     {
         protected BaseRowIterator<?> applyToPartition(BaseRowIterator partition)
         {

@@ -164,6 +164,12 @@ public class BigTableKeyReader implements KeyReader
         return dataPosition;
     }
 
+    @Override
+    public boolean isIndexed()
+    {
+        return detailed && rowIndexEntry != null && rowIndexEntry.isIndexed();
+    }
+
     public RowIndexEntry rowIndexEntry() {
         assert detailed;
         return rowIndexEntry;

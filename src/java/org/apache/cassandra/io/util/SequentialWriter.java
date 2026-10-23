@@ -117,35 +117,7 @@ public class SequentialWriter extends BufferedDataOutputStreamPlus implements Tr
     {
         try
         {
-            Set<OpenOption> options = new LinkedHashSet<>(Arrays.asList(StandardOpenOption.READ, StandardOpenOption.WRITE));
-            options.addAll(Arrays.asList(extraOptions));
-
-            if (file.exists())
-            {
-                return FileChannel.open(file.toPath(), options.toArray(OpenOption[]::new));
-            }
-            else
-            {
-                options.add(StandardOpenOption.CREATE_NEW);
-                FileChannel channel = FileChannel.open(file.toPath(), options.toArray(OpenOption[]::new));
-                try
-                {
-                    SyncUtil.trySyncDir(file.parent());
-                }
-                catch (Throwable t)
-                {
-                    try
-                    {
-                        channel.close();
-                    }
-                    catch (Throwable t2)
-                    {
-                        t.addSuppressed(t2);
-                    }
-                    throw t;
-                }
-                return channel;
-            }
+            return org.apache.cassandra.io.sstable.format.hma.HMADirectIOEngine.openWriteChannelWithFallback(file, extraOptions);
         }
         catch (IOException e)
         {

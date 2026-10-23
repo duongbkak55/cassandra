@@ -57,7 +57,7 @@ public abstract class MemtableAllocator
         }
     }
 
-    MemtableAllocator(SubAllocator onHeap, SubAllocator offHeap)
+    protected MemtableAllocator(SubAllocator onHeap, SubAllocator offHeap)
     {
         this.onHeap = onHeap;
         this.offHeap = offHeap;

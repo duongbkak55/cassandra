@@ -75,6 +75,9 @@ import org.apache.cassandra.exceptions.RequestExecutionException;
 import org.apache.cassandra.index.Index;
 import org.apache.cassandra.io.sstable.SSTableReadsListener;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.io.sstable.format.hma.HMAPrimaryIndex;
+import org.apache.cassandra.io.sstable.format.hma.HMAPrimaryIndexManager;
+import org.apache.cassandra.io.sstable.format.hma.HMARecordPointer;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.metrics.TableMetrics;
@@ -98,6 +101,7 @@ import org.apache.cassandra.utils.btree.BTreeSet;
 public class SinglePartitionReadCommand extends ReadCommand implements SinglePartitionReadQuery
 {
     private static final NoSpamLogger noSpamLogger = NoSpamLogger.getLogger(logger, 1L, TimeUnit.SECONDS);
+    private static final ThreadLocal<HMARecordPointer> HMA_READ_POINTER_TL = ThreadLocal.withInitial(HMARecordPointer::new);
     protected static final SelectionDeserializer selectionDeserializer = new Deserializer();
     protected static final Function<Seekable, SelectionDeserializer> accordSelectionDeserializer = AccordDeserializer::new;
 
@@ -804,6 +808,19 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
                                                         iter.partitionLevelDeletion().markedForDeleteAt());
             }
 
+            if (org.apache.cassandra.io.sstable.format.hma.HMAWriteBufferManager.instance().isSingleWriteEnabled(metadata()))
+            {
+                List<UnfilteredRowIterator> swbIterators = new ArrayList<>(2);
+                org.apache.cassandra.io.sstable.format.hma.HMAWriteBufferManager.instance()
+                                                                                .collectRowIterators(cfs, partitionKey(), filter, columnFilter(), swbIterators);
+                for (UnfilteredRowIterator iter : swbIterators)
+                {
+                    inputCollector.addMemtableIterator(RTBoundValidator.validate(iter, RTBoundValidator.Stage.MEMTABLE, false));
+                    mostRecentPartitionTombstone = Math.max(mostRecentPartitionTombstone,
+                                                            iter.partitionLevelDeletion().markedForDeleteAt());
+                }
+            }
+
             /*
              * We can't eliminate full sstables based on the timestamp of what we've already read like
              * in collectTimeOrderedData, but we still want to eliminate sstable whose maxTimestamp < mostRecentTombstone
@@ -823,8 +840,79 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
             if (controller.isTrackingRepairedStatus())
                 Tracing.trace("Collecting data from sstables and tracking repaired status");
 
+            HMAPrimaryIndex hmaIndex = HMAPrimaryIndexManager.instance().get(metadata().id);
+            HMARecordPointer hmaPtr = null;
+            boolean hmaSingleTarget = false;
+            boolean hmaTwoTarget = false;
+            boolean hmaBaseCompleteCutoff = false;
+            if (hmaIndex != null && view.sstables.size() > 1 && !controller.isTrackingRepairedStatus())
+            {
+                HMARecordPointer candidate = HMA_READ_POINTER_TL.get();
+                if (hmaIndex.lookup(partitionKey(), candidate) && !candidate.isMultiBlock())
+                {
+                    if (!candidate.isMultiSSTable() && candidate.sstableId != 0L)
+                    {
+                        for (int i = 0, n = view.sstables.size(); i < n; i++)
+                        {
+                            if (HMARecordPointer.resolveSSTableId(view.sstables.get(i).descriptor) == candidate.sstableId)
+                            {
+                                hmaPtr = candidate;
+                                hmaSingleTarget = true;
+                                break;
+                            }
+                        }
+                    }
+                    else if (candidate.isMultiSSTable() && candidate.baseSstableId > 0)
+                    {
+                        boolean foundPrimary = false;
+                        boolean foundBase = false;
+                        for (int i = 0, n = view.sstables.size(); i < n; i++)
+                        {
+                            long sid = HMARecordPointer.resolveSSTableId(view.sstables.get(i).descriptor);
+                            if (sid == candidate.sstableId)
+                                foundPrimary = true;
+                            else if (sid == candidate.baseSstableId)
+                                foundBase = true;
+                        }
+                        if (foundPrimary && foundBase)
+                        {
+                            hmaPtr = candidate;
+                            if (candidate.isTwoSSTable())
+                                hmaTwoTarget = true;
+                            else if (candidate.isBaseComplete())
+                                hmaBaseCompleteCutoff = true;
+                        }
+                    }
+                }
+            }
+
+            if (hmaPtr != null)
+                hmaIndex.setThreadLocalLookupHint(partitionKey(), hmaPtr);
+
+            try
+            {
             for (SSTableReader sstable : view.sstables)
             {
+                long sid = hmaPtr != null ? HMARecordPointer.resolveSSTableId(sstable.descriptor) : 0L;
+                if (hmaPtr != null)
+                {
+                    if (hmaSingleTarget && sid != hmaPtr.sstableId)
+                    {
+                        nonIntersectingSSTables++;
+                        continue;
+                    }
+                    if (hmaTwoTarget && sid != hmaPtr.sstableId && sid != hmaPtr.baseSstableId)
+                    {
+                        nonIntersectingSSTables++;
+                        continue;
+                    }
+                    if (hmaBaseCompleteCutoff && sid > 0 && sid < hmaPtr.baseSstableId)
+                    {
+                        nonIntersectingSSTables++;
+                        continue;
+                    }
+                }
+
                 // if we've already seen a partition tombstone with a timestamp greater
                 // than the most recent update to this sstable, we can skip it
                 // if we're tracking repaired status, we mark the repaired digest inconclusive
@@ -852,8 +940,25 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
                         controller.updateMinOldestUnrepairedTombstone(sstable.getMinLocalDeletionTime());
 
                     // 'iter' is added to iterators which is closed on exception, or through the closing of the final merged iterator
-                    UnfilteredRowIterator iter = intersects ? makeRowIteratorWithLowerBound(cfs, sstable, metricsCollector)
-                                                            : makeRowIteratorWithSkippedNonStaticContent(cfs, sstable, metricsCollector);
+                    UnfilteredRowIterator iter;
+                    if (!intersects)
+                    {
+                        iter = makeRowIteratorWithSkippedNonStaticContent(cfs, sstable, metricsCollector);
+                    }
+                    else if (hmaPtr != null && (sid == hmaPtr.sstableId || sid == hmaPtr.baseSstableId))
+                    {
+                        iter = StorageHook.instance.makeRowIterator(cfs,
+                                                                    sstable,
+                                                                    partitionKey(),
+                                                                    filter.getSlices(cfs.metadata()),
+                                                                    columnFilter(),
+                                                                    filter.isReversed(),
+                                                                    metricsCollector);
+                    }
+                    else
+                    {
+                        iter = makeRowIteratorWithLowerBound(cfs, sstable, metricsCollector);
+                    }
 
                     if (rowTransformer != null)
                         iter = Transformation.apply(iter, rowTransformer.apply(sstable.getId()));
@@ -894,6 +999,12 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
                         iter.close();
                     }
                 }
+            }
+            }
+            finally
+            {
+                if (hmaPtr != null)
+                    HMAPrimaryIndex.clearThreadLocalLookupHint();
             }
 
             if (Tracing.isTracing())
@@ -1046,11 +1157,95 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
             }
         }
 
+        if (org.apache.cassandra.io.sstable.format.hma.HMAWriteBufferManager.instance().isSingleWriteEnabled(metadata()))
+        {
+            List<UnfilteredRowIterator> swbIterators = new ArrayList<>(2);
+            org.apache.cassandra.io.sstable.format.hma.HMAWriteBufferManager.instance()
+                                                                            .collectRowIterators(cfs, partitionKey, filter, columnFilter(), swbIterators);
+            for (UnfilteredRowIterator swbIter : swbIterators)
+            {
+                try (UnfilteredRowIterator iter = swbIter)
+                {
+                    result = add(RTBoundValidator.validate(iter, RTBoundValidator.Stage.MEMTABLE, false),
+                                 result,
+                                 filter,
+                                 false,
+                                 controller);
+                }
+            }
+        }
+
         /* add the SSTables on disk */
         view.sstables.sort(SSTableReader.maxTimestampDescending);
+
+        HMAPrimaryIndex hmaIndex = HMAPrimaryIndexManager.instance().get(metadata().id);
+        HMARecordPointer hmaPtr = null;
+        boolean hmaSingleTarget = false;
+        boolean hmaTwoTarget = false;
+        boolean hmaBaseCompleteCutoff = false;
+        if (hmaIndex != null && view.sstables.size() > 1 && !controller.isTrackingRepairedStatus())
+        {
+            HMARecordPointer candidate = HMA_READ_POINTER_TL.get();
+            if (hmaIndex.lookup(partitionKey(), candidate) && !candidate.isMultiBlock())
+            {
+                if (!candidate.isMultiSSTable() && candidate.sstableId != 0L)
+                {
+                    for (int i = 0, n = view.sstables.size(); i < n; i++)
+                    {
+                        if (HMARecordPointer.resolveSSTableId(view.sstables.get(i).descriptor) == candidate.sstableId)
+                        {
+                            hmaPtr = candidate;
+                            hmaSingleTarget = true;
+                            break;
+                        }
+                    }
+                }
+                else if (candidate.isMultiSSTable() && candidate.baseSstableId > 0)
+                {
+                    boolean foundPrimary = false;
+                    boolean foundBase = false;
+                    for (int i = 0, n = view.sstables.size(); i < n; i++)
+                    {
+                        long sid = HMARecordPointer.resolveSSTableId(view.sstables.get(i).descriptor);
+                        if (sid == candidate.sstableId)
+                            foundPrimary = true;
+                        else if (sid == candidate.baseSstableId)
+                            foundBase = true;
+                    }
+                    if (foundPrimary && foundBase)
+                    {
+                        hmaPtr = candidate;
+                        if (candidate.isTwoSSTable())
+                            hmaTwoTarget = true;
+                        else if (candidate.isBaseComplete())
+                            hmaBaseCompleteCutoff = true;
+                    }
+                }
+            }
+        }
+
         // read sorted sstables
         for (SSTableReader sstable : view.sstables)
         {
+            if (hmaPtr != null)
+            {
+                long sid = HMARecordPointer.resolveSSTableId(sstable.descriptor);
+                if (hmaSingleTarget && sid != hmaPtr.sstableId)
+                {
+                    hmaIndex.recordDirectReadBypass();
+                    continue;
+                }
+                if (hmaTwoTarget && sid != hmaPtr.sstableId && sid != hmaPtr.baseSstableId)
+                {
+                    hmaIndex.recordDirectReadBypass();
+                    continue;
+                }
+                if (hmaBaseCompleteCutoff && sid > 0 && sid < hmaPtr.baseSstableId)
+                {
+                    hmaIndex.recordDirectReadBypass();
+                    continue;
+                }
+            }
             // if we've already seen a partition tombstone with a timestamp greater
             // than the most recent update to this sstable, we're done, since the rest of the sstables
             // will also be older
