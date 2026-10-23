@@ -1,0 +1,5 @@
+*
+!bin/**
+!conf/**
+!build/apache-cassandra-*.jar
+!build/lib/jars/*.jar
