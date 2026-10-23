@@ -230,8 +230,47 @@ public class CQL3CasRequest implements CASRequest
         }
     }
 
+    private boolean requiresReadForUpdate()
+    {
+        for (RowUpdate upd : updates)
+            if (upd.stmt.requiresRead())
+                return true;
+        for (RangeDeletion upd : rangeDeletions)
+            if (upd.stmt.requiresRead())
+                return true;
+        return false;
+    }
+
+    private boolean canProjectOnlyConditionColumns()
+    {
+        if (hasExists || staticConditions != null || conditions.isEmpty() || conditionColumns.isEmpty() || requiresReadForUpdate())
+            return false;
+
+        for (RowCondition rc : conditions.values())
+        {
+            if (!(rc instanceof ColumnsConditions))
+                return false;
+            ColumnsConditions cc = (ColumnsConditions) rc;
+            boolean hasNonNullRequiringBound = false;
+            for (ColumnCondition.Bound bound : cc.conditions)
+            {
+                if (!bound.appliesTo(null))
+                {
+                    hasNonNullRequiringBound = true;
+                    break;
+                }
+            }
+            if (!hasNonNullRequiringBound)
+                return false;
+        }
+        return true;
+    }
+
     private RegularAndStaticColumns columnsToRead()
     {
+        if (org.apache.cassandra.io.sstable.format.hma.HMAFastCasEngine.isEnabled() && canProjectOnlyConditionColumns())
+            return conditionColumns;
+
         RegularAndStaticColumns allColumns = metadata.regularAndStaticColumns();
 
         // If we update static row, we won't have any conditions on regular rows.
@@ -312,6 +351,21 @@ public class CQL3CasRequest implements CASRequest
         return partitionUpdate;
     }
 
+    public PartitionUpdate makeUpdatesWithTimestamp(FilteredPartition current, ClientState clientState, Ballot ballot, long commitTimestamp) throws InvalidRequestException
+    {
+        PartitionUpdate.Builder updateBuilder = new PartitionUpdate.Builder(metadata, key, updatedColumns(), conditions.size());
+        long timeUuidNanos = 0;
+        for (RowUpdate upd : updates)
+            timeUuidNanos = upd.applyUpdatesWithTimestamp(current, updateBuilder, clientState, ballot.msb(), timeUuidNanos, commitTimestamp);
+        for (RangeDeletion upd : rangeDeletions)
+            upd.applyUpdatesWithTimestamp(current, updateBuilder, clientState, commitTimestamp);
+
+        PartitionUpdate partitionUpdate = updateBuilder.build();
+        IndexRegistry.obtain(metadata).validate(partitionUpdate, clientState);
+
+        return partitionUpdate;
+    }
+
     private static class CASUpdateBuilder extends RowUpdateBuilder implements PartialFunctionContext
     {
         final long timeUuidMsb;
@@ -360,9 +414,14 @@ public class CQL3CasRequest implements CASRequest
 
         long applyUpdates(FilteredPartition current, PartitionUpdate.Builder updateBuilder, ClientState state, long timeUuidMsb, long timeUuidNanos)
         {
+            return applyUpdatesWithTimestamp(current, updateBuilder, state, timeUuidMsb, timeUuidNanos, timestamp);
+        }
+
+        long applyUpdatesWithTimestamp(FilteredPartition current, PartitionUpdate.Builder updateBuilder, ClientState state, long timeUuidMsb, long timeUuidNanos, long effectiveTimestamp)
+        {
             Map<DecoratedKey, Partition> map = stmt.requiresRead() ? Collections.singletonMap(key, current) : null;
             CASUpdateBuilder params =
-                new CASUpdateBuilder(metadata, state, options, timestamp, nowInSeconds,
+                new CASUpdateBuilder(metadata, state, options, effectiveTimestamp, nowInSeconds,
                                      stmt.getTimeToLive(options), map, timeUuidMsb, timeUuidNanos);
             stmt.addUpdateForKey(updateBuilder, clustering, params);
             return params.timeUuidNanos;
@@ -388,13 +447,18 @@ public class CQL3CasRequest implements CASRequest
 
         void applyUpdates(FilteredPartition current, PartitionUpdate.Builder updateBuilder, ClientState state)
         {
+            applyUpdatesWithTimestamp(current, updateBuilder, state, timestamp);
+        }
+
+        void applyUpdatesWithTimestamp(FilteredPartition current, PartitionUpdate.Builder updateBuilder, ClientState state, long effectiveTimestamp)
+        {
             // No slice statements currently require a read, but this maintains consistency with RowUpdate, and future proofs us
             Map<DecoratedKey, Partition> map = stmt.requiresRead() ? Collections.singletonMap(key, current) : null;
             RowUpdateBuilder params =
                 new NoTimeRowUpdateBuilder(metadata,
                                            state,
                                            options,
-                                           timestamp,
+                                           effectiveTimestamp,
                                            nowInSeconds,
                                            stmt.getTimeToLive(options),
                                            map);

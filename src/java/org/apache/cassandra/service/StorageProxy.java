@@ -384,11 +384,25 @@ public class StorageProxy implements StorageProxyMBean
                                                             key, keyspaceName, cfName));
         }
 
+        TableMetadata fastCasMetadata = Schema.instance.validateTable(keyspaceName, cfName);
+        if (org.apache.cassandra.io.sstable.format.hma.HMAFastCasEngine.canExecuteFastCas(fastCasMetadata, key, consistencyForPaxos, consistencyForCommit))
+        {
+            return org.apache.cassandra.io.sstable.format.hma.HMAFastCasEngine.executeCas(fastCasMetadata,
+                                                                                          key,
+                                                                                          request,
+                                                                                          consistencyForPaxos,
+                                                                                          consistencyForCommit,
+                                                                                          clientState,
+                                                                                          nowInSeconds,
+                                                                                          requestTime,
+                                                                                          casWriteMetrics);
+        }
+
         ConsensusAttemptResult lastAttemptResult = null;
         do
         {
             ClusterMetadata cm = ClusterMetadata.current();
-            TableMetadata metadata = Schema.instance.validateTable(keyspaceName, cfName);
+            TableMetadata metadata = fastCasMetadata;
             ConsensusRoutingDecision decision = consensusRouting(cm, metadata, key, consistencyForPaxos, requestTime, true);
             switch (decision.target)
             {

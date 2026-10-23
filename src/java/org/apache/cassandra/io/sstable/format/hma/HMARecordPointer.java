@@ -58,7 +58,8 @@ public final class HMARecordPointer
     public static final int OFFSET_GENERATION = 36;
     public static final int OFFSET_TIMESTAMP = 40;
     public static final int OFFSET_FLAGS = 48;
-    public static final int OFFSET_RESERVED = 49;
+    public static final int OFFSET_EXT_FLAGS = 49;
+    public static final int OFFSET_FIRST_DELTA_SSTABLE_ID = 50;
     public static final int OFFSET_BASE_SSTABLE_ID = 52;
     public static final int OFFSET_BASE_DATA_OFFSET = 56;
 
@@ -72,6 +73,9 @@ public final class HMARecordPointer
     public static final byte FLAG_TWO_SSTABLE        = 0x20;
     public static final byte FLAG_BASE_COMPLETE      = 0x40;
 
+    // Extended flags (byte 49)
+    public static final byte EXT_FLAG_THREE_SSTABLE  = 0x01;
+
     // In-memory representation
     public long keyHashHi;
     public long keyHashLo;
@@ -81,6 +85,8 @@ public final class HMARecordPointer
     public int generation;
     public long timestamp;
     public byte flags;
+    public byte extFlags;
+    public int firstDeltaSstableId;
     public int baseSstableId;
     public long baseDataOffset = -1L;
 
@@ -105,6 +111,8 @@ public final class HMARecordPointer
         this.generation = generation;
         this.timestamp = timestamp;
         this.flags = flags;
+        this.extFlags = 0;
+        this.firstDeltaSstableId = 0;
         this.baseSstableId = 0;
         this.baseDataOffset = -1L;
     }
@@ -132,6 +140,11 @@ public final class HMARecordPointer
     public boolean isTwoSSTable()
     {
         return (flags & FLAG_TWO_SSTABLE) != 0;
+    }
+
+    public boolean isThreeSSTable()
+    {
+        return (extFlags & EXT_FLAG_THREE_SSTABLE) != 0;
     }
 
     public boolean isBaseComplete()
@@ -188,6 +201,8 @@ public final class HMARecordPointer
         this.generation = other.generation;
         this.timestamp = other.timestamp;
         this.flags = other.flags;
+        this.extFlags = other.extFlags;
+        this.firstDeltaSstableId = other.firstDeltaSstableId;
         this.baseSstableId = other.baseSstableId;
         this.baseDataOffset = other.baseDataOffset;
     }
@@ -205,6 +220,8 @@ public final class HMARecordPointer
         this.generation = memory.getInt(byteOffset + OFFSET_GENERATION);
         this.timestamp = memory.getLong(byteOffset + OFFSET_TIMESTAMP);
         this.flags = memory.getByte(byteOffset + OFFSET_FLAGS);
+        this.extFlags = memory.getByte(byteOffset + OFFSET_EXT_FLAGS);
+        this.firstDeltaSstableId = readUnsignedShort(memory, byteOffset + OFFSET_FIRST_DELTA_SSTABLE_ID);
         this.baseSstableId = memory.getInt(byteOffset + OFFSET_BASE_SSTABLE_ID);
         this.baseDataOffset = memory.getLong(byteOffset + OFFSET_BASE_DATA_OFFSET);
     }
@@ -222,8 +239,23 @@ public final class HMARecordPointer
         memory.setInt(byteOffset + OFFSET_GENERATION, this.generation);
         memory.setLong(byteOffset + OFFSET_TIMESTAMP, this.timestamp);
         memory.setByte(byteOffset + OFFSET_FLAGS, this.flags);
+        memory.setByte(byteOffset + OFFSET_EXT_FLAGS, this.extFlags);
+        writeUnsignedShort(memory, byteOffset + OFFSET_FIRST_DELTA_SSTABLE_ID, this.firstDeltaSstableId);
         memory.setInt(byteOffset + OFFSET_BASE_SSTABLE_ID, this.baseSstableId);
         memory.setLong(byteOffset + OFFSET_BASE_DATA_OFFSET, this.baseDataOffset);
+    }
+
+    public static int readUnsignedShort(Memory memory, long byteOffset)
+    {
+        int hi = memory.getByte(byteOffset) & 0xFF;
+        int lo = memory.getByte(byteOffset + 1) & 0xFF;
+        return (hi << 8) | lo;
+    }
+
+    public static void writeUnsignedShort(Memory memory, long byteOffset, int value)
+    {
+        memory.setByte(byteOffset, (byte) ((value >>> 8) & 0xFF));
+        memory.setByte(byteOffset + 1, (byte) (value & 0xFF));
     }
 
     /**

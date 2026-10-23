@@ -49,7 +49,7 @@ import org.apache.cassandra.utils.memory.Cloner;
  */
 public final class HMAOffHeapArena implements AddressBasedAllocator, AutoCloseable
 {
-    private static final int STRIPE_COUNT = 8;
+    private static final int STRIPE_COUNT = 32;
     private static final int STRIPE_MASK = STRIPE_COUNT - 1;
 
     private final HMAOffHeapArenaPool pool;
@@ -101,23 +101,16 @@ public final class HMAOffHeapArena implements AddressBasedAllocator, AutoCloseab
             }
 
             Slab next = pool.acquireSlab(slabSizeBytes);
-            long addr = next.allocate(size);
-            if (addr < 0)
-            {
-                pool.releaseSlab(next);
-                throw new IllegalStateException("Fresh slab failed to satisfy allocation of " + size + " bytes");
-            }
-
             if (activeStripes.compareAndSet(stripe, current, next))
             {
                 ownedSlabs.add(next);
-                return addr;
+                long addr = next.allocate(size);
+                if (addr >= 0)
+                    return addr;
             }
             else
             {
-                // Lost stripe race: still keep the slab in ownedSlabs or try to use its remaining space
-                ownedSlabs.add(next);
-                return addr;
+                pool.releaseSlab(next);
             }
         }
     }
@@ -136,12 +129,17 @@ public final class HMAOffHeapArena implements AddressBasedAllocator, AutoCloseab
 
     public Cloner cloner()
     {
-        return new HMAOffHeapCloner(this, null, 0);
+        return new HMAOffHeapCloner(this, null, 0, new long[1]);
     }
 
     public Cloner cloner(OpOrder.Group opGroup)
     {
-        return new HMAOffHeapCloner(this, opGroup, 0);
+        return new HMAOffHeapCloner(this, opGroup, 0, new long[1]);
+    }
+
+    public HMAOffHeapCloner trackingCloner(OpOrder.Group opGroup)
+    {
+        return new HMAOffHeapCloner(this, opGroup, 0, new long[1]);
     }
 
     public long getAllocatedBytes()
@@ -190,26 +188,43 @@ public final class HMAOffHeapArena implements AddressBasedAllocator, AutoCloseab
      * Context-aware off-heap cloner that pre-allocates a single contiguous slice from {@link HMAOffHeapArena}
      * for all cells and clusterings of a partition mutation, eliminating per-cell atomic operations.
      */
-    static final class HMAOffHeapCloner implements Cloner, AddressBasedAllocator
+    public static final class HMAOffHeapCloner implements Cloner, AddressBasedAllocator
     {
         private final HMAOffHeapArena arena;
         private final OpOrder.Group opGroup;
         private final long chunkAddress;
         private final int chunkLimit;
+        private final long[] threadAllocated;
         private int chunkOffset = 0;
 
-        HMAOffHeapCloner(HMAOffHeapArena arena, OpOrder.Group opGroup, int preallocatedSize)
+        HMAOffHeapCloner(HMAOffHeapArena arena, OpOrder.Group opGroup, int preallocatedSize, long[] threadAllocated)
         {
             this.arena = arena;
             this.opGroup = opGroup;
+            this.threadAllocated = threadAllocated;
             int aligned = preallocatedSize > 0 ? ((preallocatedSize + 7) & ~7) : 0;
             this.chunkLimit = aligned;
-            this.chunkAddress = aligned > 0 ? arena.allocate(aligned, opGroup) : -1L;
+            if (aligned > 0)
+            {
+                this.chunkAddress = arena.allocate(aligned, opGroup);
+                threadAllocated[0] += Math.max(8, aligned);
+            }
+            else
+            {
+                this.chunkAddress = -1L;
+            }
+        }
+
+        public long allocatedBytes()
+        {
+            return threadAllocated[0];
         }
 
         @Override
         public DecoratedKey clone(DecoratedKey key)
         {
+            if (!(key instanceof NativeDecoratedKey))
+                threadAllocated[0] += Math.max(8, (key.getKeyLength() + 4 + 7) & ~7);
             return arena.cloneKey(key, opGroup);
         }
 
@@ -248,7 +263,7 @@ public final class HMAOffHeapArena implements AddressBasedAllocator, AutoCloseab
         @Override
         public Cloner createContextAwareCloner(int estimatedCloneSize)
         {
-            return new HMAOffHeapCloner(arena, opGroup, estimatedCloneSize);
+            return new HMAOffHeapCloner(arena, opGroup, estimatedCloneSize, threadAllocated);
         }
 
         @Override
@@ -261,6 +276,7 @@ public final class HMAOffHeapArena implements AddressBasedAllocator, AutoCloseab
                 chunkOffset += aligned;
                 return addr;
             }
+            threadAllocated[0] += Math.max(8, aligned);
             return arena.allocate(aligned, group);
         }
 

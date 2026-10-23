@@ -48,7 +48,7 @@ public final class HMAOffHeapArenaPool
     public static final String USE_FFM_PROP = "cassandra.hma.arena.use_ffm";
 
     public static final int DEFAULT_SLAB_SIZE_BYTES = 1024 * 1024; // 1 MiB slab (matches Aerospike wblock / arena unit)
-    public static final int DEFAULT_MAX_POOLED_SLABS = 256;        // Up to 256 MiB pooled off-heap slabs
+    public static final int DEFAULT_MAX_POOLED_SLABS = 64;         // Up to 64 MiB pooled off-heap slabs
     public static final int CACHE_LINE_ALIGNMENT = 64;
 
     private static final HMAOffHeapArenaPool INSTANCE = new HMAOffHeapArenaPool();

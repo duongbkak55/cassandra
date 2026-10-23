@@ -353,4 +353,28 @@ public class HMAPrimaryIndexMetrics implements HMAPrimaryIndexMXBean
     {
         return org.apache.cassandra.db.memtable.HMAOffHeapMemtable.getDirectLookupMisses();
     }
+
+    @Override
+    public boolean isFastCasEnabled()
+    {
+        return HMAFastCasEngine.isEnabled();
+    }
+
+    @Override
+    public void setFastCasEnabled(boolean enabled)
+    {
+        HMAFastCasEngine.setEnabled(enabled);
+    }
+
+    @Override
+    public long getFastCasSuccessCount()
+    {
+        return HMAFastCasEngine.getFastCasSuccessCount();
+    }
+
+    @Override
+    public long getFastCasConditionNotMetCount()
+    {
+        return HMAFastCasEngine.getFastCasConditionNotMetCount();
+    }
 }

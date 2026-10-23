@@ -162,4 +162,13 @@ public interface HMAPrimaryIndexMXBean
     long getOffHeapMemtablePutOps();
     long getOffHeapMemtableDirectLookupHits();
     long getOffHeapMemtableDirectLookupMisses();
+
+    // =========================================================================
+    // Phase 6.1: Partition-Level Fast-CAS Engine Metrics
+    // =========================================================================
+
+    boolean isFastCasEnabled();
+    void setFastCasEnabled(boolean enabled);
+    long getFastCasSuccessCount();
+    long getFastCasConditionNotMetCount();
 }

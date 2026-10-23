@@ -844,8 +844,12 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
             HMARecordPointer hmaPtr = null;
             boolean hmaSingleTarget = false;
             boolean hmaTwoTarget = false;
+            boolean hmaThreeTarget = false;
             boolean hmaBaseCompleteCutoff = false;
-            if (hmaIndex != null && view.sstables.size() > 1 && !controller.isTrackingRepairedStatus())
+            if (hmaIndex != null
+                && view.sstables.size() > 1
+                && !controller.isTrackingRepairedStatus()
+                && view.sstables.get(0).getMaxTimestamp() >= mostRecentPartitionTombstone)
             {
                 HMARecordPointer candidate = HMA_READ_POINTER_TL.get();
                 if (hmaIndex.lookup(partitionKey(), candidate) && !candidate.isMultiBlock())
@@ -865,12 +869,15 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
                     else if (candidate.isMultiSSTable() && candidate.baseSstableId > 0)
                     {
                         boolean foundPrimary = false;
+                        boolean foundFirstDelta = false;
                         boolean foundBase = false;
                         for (int i = 0, n = view.sstables.size(); i < n; i++)
                         {
                             long sid = HMARecordPointer.resolveSSTableId(view.sstables.get(i).descriptor);
                             if (sid == candidate.sstableId)
                                 foundPrimary = true;
+                            else if (candidate.firstDeltaSstableId > 0 && sid == candidate.firstDeltaSstableId)
+                                foundFirstDelta = true;
                             else if (sid == candidate.baseSstableId)
                                 foundBase = true;
                         }
@@ -879,6 +886,8 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
                             hmaPtr = candidate;
                             if (candidate.isTwoSSTable())
                                 hmaTwoTarget = true;
+                            else if (candidate.isThreeSSTable() && foundFirstDelta)
+                                hmaThreeTarget = true;
                             else if (candidate.isBaseComplete())
                                 hmaBaseCompleteCutoff = true;
                         }
@@ -906,10 +915,20 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
                         nonIntersectingSSTables++;
                         continue;
                     }
-                    if (hmaBaseCompleteCutoff && sid > 0 && sid < hmaPtr.baseSstableId)
+                    if (hmaThreeTarget && sid != hmaPtr.sstableId && sid != hmaPtr.firstDeltaSstableId && sid != hmaPtr.baseSstableId)
                     {
                         nonIntersectingSSTables++;
                         continue;
+                    }
+                    if (hmaBaseCompleteCutoff && sid > 0)
+                    {
+                        if (sid < hmaPtr.baseSstableId
+                            || (hmaPtr.sstableId > 0 && sid > hmaPtr.sstableId)
+                            || (hmaPtr.firstDeltaSstableId > 0 && sid < hmaPtr.firstDeltaSstableId && sid != hmaPtr.baseSstableId))
+                        {
+                            nonIntersectingSSTables++;
+                            continue;
+                        }
                     }
                 }
 
@@ -945,7 +964,7 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
                     {
                         iter = makeRowIteratorWithSkippedNonStaticContent(cfs, sstable, metricsCollector);
                     }
-                    else if (hmaPtr != null && (sid == hmaPtr.sstableId || sid == hmaPtr.baseSstableId))
+                    else if (hmaPtr != null && (sid == hmaPtr.sstableId || sid == hmaPtr.firstDeltaSstableId || sid == hmaPtr.baseSstableId))
                     {
                         iter = StorageHook.instance.makeRowIterator(cfs,
                                                                     sstable,
@@ -1136,6 +1155,18 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
      */
     private UnfilteredRowIterator queryMemtableAndSSTablesInTimestampOrder(ColumnFamilyStore cfs, ColumnFamilyStore.ViewFragment view, Function<CellSourceIdentifier, Transformation<BaseRowIterator<?>>> rowTransformer, ClusteringIndexNamesFilter filter, ReadExecutionController controller)
     {
+        final boolean canCachePreRead = org.apache.cassandra.io.sstable.format.hma.HMAFastCasEngine.isEnabled()
+                                        && !controller.isTrackingRepairedStatus()
+                                        && columnFilter().fetchesAllColumns(false)
+                                        && filter.selectsAllPartition()
+                                        && rowFilter().isEmpty();
+        final long hmaSeqBefore = canCachePreRead
+                                  ? org.apache.cassandra.io.sstable.format.hma.HMAFastCasEngine.readStripeSeq(metadata().id, partitionKey())
+                                  : -1L;
+        final long hmaEpochBefore = canCachePreRead
+                                    ? org.apache.cassandra.io.sstable.format.hma.HMAFastCasEngine.currentCacheEpoch()
+                                    : -1L;
+
         ImmutableBTreePartition result = null;
         SSTableReadMetricsCollector metricsCollector = new SSTableReadMetricsCollector();
 
@@ -1182,6 +1213,7 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
         HMARecordPointer hmaPtr = null;
         boolean hmaSingleTarget = false;
         boolean hmaTwoTarget = false;
+        boolean hmaThreeTarget = false;
         boolean hmaBaseCompleteCutoff = false;
         if (hmaIndex != null && view.sstables.size() > 1 && !controller.isTrackingRepairedStatus())
         {
@@ -1203,12 +1235,15 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
                 else if (candidate.isMultiSSTable() && candidate.baseSstableId > 0)
                 {
                     boolean foundPrimary = false;
+                    boolean foundFirstDelta = false;
                     boolean foundBase = false;
                     for (int i = 0, n = view.sstables.size(); i < n; i++)
                     {
                         long sid = HMARecordPointer.resolveSSTableId(view.sstables.get(i).descriptor);
                         if (sid == candidate.sstableId)
                             foundPrimary = true;
+                        else if (candidate.firstDeltaSstableId > 0 && sid == candidate.firstDeltaSstableId)
+                            foundFirstDelta = true;
                         else if (sid == candidate.baseSstableId)
                             foundBase = true;
                     }
@@ -1217,6 +1252,8 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
                         hmaPtr = candidate;
                         if (candidate.isTwoSSTable())
                             hmaTwoTarget = true;
+                        else if (candidate.isThreeSSTable() && foundFirstDelta)
+                            hmaThreeTarget = true;
                         else if (candidate.isBaseComplete())
                             hmaBaseCompleteCutoff = true;
                     }
@@ -1240,10 +1277,20 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
                     hmaIndex.recordDirectReadBypass();
                     continue;
                 }
-                if (hmaBaseCompleteCutoff && sid > 0 && sid < hmaPtr.baseSstableId)
+                if (hmaThreeTarget && sid != hmaPtr.sstableId && sid != hmaPtr.firstDeltaSstableId && sid != hmaPtr.baseSstableId)
                 {
                     hmaIndex.recordDirectReadBypass();
                     continue;
+                }
+                if (hmaBaseCompleteCutoff && sid > 0)
+                {
+                    if (sid < hmaPtr.baseSstableId
+                        || (hmaPtr.sstableId > 0 && sid > hmaPtr.sstableId)
+                        || (hmaPtr.firstDeltaSstableId > 0 && sid < hmaPtr.firstDeltaSstableId && sid != hmaPtr.baseSstableId))
+                    {
+                        hmaIndex.recordDirectReadBypass();
+                        continue;
+                    }
                 }
             }
             // if we've already seen a partition tombstone with a timestamp greater
@@ -1328,6 +1375,24 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
         cfs.metric.topReadPartitionFrequency.addSample(key.getKey(), 1);
         cfs.metric.topReadPartitionSSTableCount.addSample(key.getKey(), metricsCollector.getMergedSSTables());
         StorageHook.instance.reportRead(cfs.metadata.id, partitionKey());
+
+        if (canCachePreRead && (hmaSeqBefore & 1L) == 0L)
+        {
+            try (org.apache.cassandra.db.rows.RowIterator filteredIter = UnfilteredRowIterators.filter(result.unfilteredIterator(columnFilter(), Slices.ALL, false),
+                                                                                                       nowInSec()))
+            {
+                if (filteredIter.hasNext() || !filteredIter.staticRow().isEmpty())
+                {
+                    org.apache.cassandra.db.partitions.FilteredPartition fp = org.apache.cassandra.db.partitions.FilteredPartition.create(filteredIter);
+                    org.apache.cassandra.io.sstable.format.hma.HMAFastCasEngine.recordPreRead(metadata(),
+                                                                                              partitionKey(),
+                                                                                              fp,
+                                                                                              nowInSec(),
+                                                                                              hmaSeqBefore,
+                                                                                              hmaEpochBefore);
+                }
+            }
+        }
 
         return result.unfilteredIterator(columnFilter(), Slices.ALL, clusteringIndexFilter().isReversed());
     }

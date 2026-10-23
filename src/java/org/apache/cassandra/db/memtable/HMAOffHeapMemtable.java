@@ -174,8 +174,7 @@ public class HMAOffHeapMemtable extends AbstractAllocatorMemtable
     public long put(PartitionUpdate update, UpdateTransaction indexer, OpOrder.Group opGroup, boolean assumeMissing)
     {
         long initialSize = 0;
-        long arenaBefore = arena.allocatedBytes();
-        Cloner cloner = arena.cloner(opGroup);
+        HMAOffHeapArena.HMAOffHeapCloner cloner = arena.trackingCloner(opGroup);
         DecoratedKey key = update.partitionKey();
 
         AtomicBTreePartition previous = assumeMissing ? null : keyIndex.get(key);
@@ -189,16 +188,16 @@ public class HMAOffHeapMemtable extends AbstractAllocatorMemtable
                 partitions.put(cloneKey, empty);
                 previous = empty;
                 allocator.onHeap().allocate(PARTITION_HEAP_OVERHEAD);
-                initialSize = 8;
+                initialSize = 8 + cloneKey.getKeyLength();
             }
         }
 
         BTreePartitionUpdater updater = previous.addAll(update, cloner, opGroup, indexer);
-        long arenaDelta = Math.max(0L, arena.allocatedBytes() - arenaBefore);
-        if (arenaDelta > 0)
+        long opArenaQuota = cloner.allocatedBytes() / 6;
+        if (opArenaQuota > 0)
         {
-            // Account arena off-heap growth into the active memtable pool so flush thresholds trigger normally
-            allocator.onHeap().allocate(arenaDelta);
+            // Scale off-heap arena allocation by 1/6 against the ~112 MB on-heap threshold so off-heap memtables auto-flush at ~672 MB
+            allocator.onHeap().allocate(opArenaQuota);
         }
 
         updateMin(minTimestamp, update.stats().minTimestamp);

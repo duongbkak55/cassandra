@@ -213,11 +213,10 @@ public class HMAFlushObserver implements SSTableFlushObserver
             else
             {
                 ComplexColumnData complex = (ComplexColumnData) cd;
-                if (!complex.complexDeletion().isLive())
-                {
+                if (!complex.complexDeletion().isLive() || complex.cellsCount() > 0)
                     currentColumnCount++;
+                if (!complex.complexDeletion().isLive())
                     currentMaxTimestamp = Math.max(currentMaxTimestamp, complex.complexDeletion().markedForDeleteAt());
-                }
                 for (Cell<?> cell : complex)
                     currentMaxTimestamp = Math.max(currentMaxTimestamp, cell.timestamp());
             }

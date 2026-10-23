@@ -1530,6 +1530,8 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean, Memtable.Owner
         long start = nanoTime();
         OpOrder.Group opGroup = context.getGroup();
         CommitLogPosition commitLogPosition = context.getPosition();
+        DecoratedKey key = update.partitionKey();
+        int hmaStripe = org.apache.cassandra.io.sstable.format.hma.HMAFastCasEngine.beginPartitionWrite(metadata.id, key);
         try
         {
             long timeDelta = Long.MAX_VALUE;
@@ -1558,7 +1560,6 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean, Memtable.Owner
                     timeDelta = mt.put(update, indexer, opGroup);
                 }
             }
-            DecoratedKey key = update.partitionKey();
             invalidateCachedPartition(key);
             metric.topWritePartitionFrequency.addSample(key.getKey(), 1);
             if (metric.topWritePartitionSize.isEnabled()) // dont compute datasize if not needed
@@ -1584,6 +1585,10 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean, Memtable.Owner
                 throw new InvalidRequestException(message, e);
 
             throw new RuntimeException(message, e);
+        }
+        finally
+        {
+            org.apache.cassandra.io.sstable.format.hma.HMAFastCasEngine.endPartitionWrite(hmaStripe);
         }
     }
     
@@ -2252,6 +2257,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean, Memtable.Owner
 
     private void invalidateCaches()
     {
+        org.apache.cassandra.io.sstable.format.hma.HMAFastCasEngine.bumpCacheEpoch();
         CacheService.instance.invalidateKeyCacheForCf(metadata());
         CacheService.instance.invalidateRowCacheForCf(metadata());
         if (metadata().isCounter())
@@ -2611,6 +2617,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean, Memtable.Owner
     @VisibleForTesting
     public void clearUnsafe()
     {
+        org.apache.cassandra.io.sstable.format.hma.HMAFastCasEngine.bumpCacheEpoch();
         for (final ColumnFamilyStore cfs : concatWithIndexes())
         {
             cfs.runWithCompactionsDisabled((Callable<Void>) () -> {

@@ -144,6 +144,7 @@ public final class HMAPrimaryIndexManager
      */
     public void remove(TableId tableId)
     {
+        HMAFastCasEngine.bumpCacheEpoch();
         HMAWriteBufferManager.instance().clearTable(tableId);
         HMAPrimaryIndex removed = indexes.remove(tableId);
         if (removed != null)

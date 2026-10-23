@@ -219,6 +219,8 @@ public final class HMAPrimaryIndexShard implements AutoCloseable
                     long existingSstableId = mem.getLong(offset + HMARecordPointer.OFFSET_SSTABLE_ID);
                     long existingDataOffset = mem.getLong(offset + HMARecordPointer.OFFSET_DATA_OFFSET);
                     int existingDataLength = mem.getInt(offset + HMARecordPointer.OFFSET_DATA_LENGTH);
+                    byte existingExtFlags = mem.getByte(offset + HMARecordPointer.OFFSET_EXT_FLAGS);
+                    int existingFirstDeltaSstableId = HMARecordPointer.readUnsignedShort(mem, offset + HMARecordPointer.OFFSET_FIRST_DELTA_SSTABLE_ID);
                     int existingBaseSstableId = mem.getInt(offset + HMARecordPointer.OFFSET_BASE_SSTABLE_ID);
                     long existingBaseDataOffset = mem.getLong(offset + HMARecordPointer.OFFSET_BASE_DATA_OFFSET);
                     boolean incomingComplete = (flags & HMARecordPointer.FLAG_COMPLETE_OVERWRITE) != 0
@@ -244,12 +246,16 @@ public final class HMAPrimaryIndexShard implements AutoCloseable
                                     updatedFlags |= HMARecordPointer.FLAG_BASE_COMPLETE;
                                 mem.setInt(offset + HMARecordPointer.OFFSET_BASE_SSTABLE_ID, (int) sstableId);
                                 mem.setLong(offset + HMARecordPointer.OFFSET_BASE_DATA_OFFSET, dataOffset);
+                                mem.setByte(offset + HMARecordPointer.OFFSET_EXT_FLAGS, (byte) 0);
+                                HMARecordPointer.writeUnsignedShort(mem, offset + HMARecordPointer.OFFSET_FIRST_DELTA_SSTABLE_ID, 0);
                                 mem.setByte(offset + HMARecordPointer.OFFSET_FLAGS, updatedFlags);
                             }
                             else if ((slotFlags & HMARecordPointer.FLAG_BASE_COMPLETE) == 0
                                      || existingBaseSstableId <= 0
                                      || sstableId > existingBaseSstableId)
                             {
+                                mem.setByte(offset + HMARecordPointer.OFFSET_EXT_FLAGS,
+                                            (byte) (existingExtFlags & ~HMARecordPointer.EXT_FLAG_THREE_SSTABLE));
                                 mem.setByte(offset + HMARecordPointer.OFFSET_FLAGS,
                                             (byte) ((slotFlags | HMARecordPointer.FLAG_MULTI_SSTABLE) & ~HMARecordPointer.FLAG_TWO_SSTABLE));
                             }
@@ -270,6 +276,8 @@ public final class HMAPrimaryIndexShard implements AutoCloseable
                     }
 
                     byte mergedFlags = flags;
+                    byte newExtFlags = 0;
+                    int newFirstDeltaSstableId = 0;
                     int newBaseSstableId = 0;
                     long newBaseDataOffset = -1L;
 
@@ -287,8 +295,13 @@ public final class HMAPrimaryIndexShard implements AutoCloseable
                             mergedFlags |= (byte) (slotFlags & (HMARecordPointer.FLAG_MULTI_SSTABLE
                                                                 | HMARecordPointer.FLAG_TWO_SSTABLE
                                                                 | HMARecordPointer.FLAG_BASE_COMPLETE));
+                            newExtFlags = existingExtFlags;
+                            newFirstDeltaSstableId = existingFirstDeltaSstableId;
                             if ((mergedFlags & HMARecordPointer.FLAG_MULTI_BLOCK) != 0)
+                            {
                                 mergedFlags &= ~HMARecordPointer.FLAG_TWO_SSTABLE;
+                                newExtFlags &= ~HMARecordPointer.EXT_FLAG_THREE_SSTABLE;
+                            }
                             newBaseSstableId = existingBaseSstableId;
                             newBaseDataOffset = existingBaseDataOffset;
                         }
@@ -316,12 +329,23 @@ public final class HMAPrimaryIndexShard implements AutoCloseable
                                 newBaseSstableId = existingBaseSstableId;
                                 newBaseDataOffset = existingBaseDataOffset;
                                 mergedFlags |= HMARecordPointer.FLAG_BASE_COMPLETE;
+                                if ((slotFlags & HMARecordPointer.FLAG_TWO_SSTABLE) != 0
+                                    && (flags & HMARecordPointer.FLAG_MULTI_BLOCK) == 0
+                                    && existingSstableId > 0 && existingSstableId <= 0xFFFF)
+                                {
+                                    newFirstDeltaSstableId = (int) existingSstableId;
+                                    newExtFlags |= HMARecordPointer.EXT_FLAG_THREE_SSTABLE;
+                                }
+                                else if (existingFirstDeltaSstableId > 0)
+                                {
+                                    newFirstDeltaSstableId = existingFirstDeltaSstableId;
+                                }
                             }
                         }
                     }
 
                     // Overwrite slot with latest record pointer
-                    writeEntry(mem, offset, hashHi, hashLo, sstableId, dataOffset, dataLength, timestamp, generation, mergedFlags, newBaseSstableId, newBaseDataOffset);
+                    writeEntry(mem, offset, hashHi, hashLo, sstableId, dataOffset, dataLength, timestamp, generation, mergedFlags, newExtFlags, newFirstDeltaSstableId, newBaseSstableId, newBaseDataOffset);
 
                     if (owner != null && !samePhysicalRecord)
                     {
@@ -345,7 +369,7 @@ public final class HMAPrimaryIndexShard implements AutoCloseable
             if (firstAvailableSlot != -1)
             {
                 long offset = (long) firstAvailableSlot * HMARecordPointer.ENTRY_SIZE;
-                writeEntry(mem, offset, hashHi, hashLo, sstableId, dataOffset, dataLength, timestamp, generation, flags, 0, -1L);
+                writeEntry(mem, offset, hashHi, hashLo, sstableId, dataOffset, dataLength, timestamp, generation, flags, (byte) 0, 0, 0, -1L);
                 size++;
                 if (owner != null && sstableId != 0L && (flags & HMARecordPointer.FLAG_TOMBSTONE) == 0)
                 {
@@ -398,6 +422,8 @@ public final class HMAPrimaryIndexShard implements AutoCloseable
                             long timestamp,
                             int generation,
                             byte flags,
+                            byte extFlags,
+                            int firstDeltaSstableId,
                             int baseSstableId,
                             long baseDataOffset)
     {
@@ -409,6 +435,8 @@ public final class HMAPrimaryIndexShard implements AutoCloseable
         mem.setInt(offset + HMARecordPointer.OFFSET_GENERATION, generation);
         mem.setLong(offset + HMARecordPointer.OFFSET_TIMESTAMP, timestamp);
         mem.setByte(offset + HMARecordPointer.OFFSET_FLAGS, (byte) (flags | HMARecordPointer.FLAG_IN_USE));
+        mem.setByte(offset + HMARecordPointer.OFFSET_EXT_FLAGS, extFlags);
+        HMARecordPointer.writeUnsignedShort(mem, offset + HMARecordPointer.OFFSET_FIRST_DELTA_SSTABLE_ID, firstDeltaSstableId);
         mem.setInt(offset + HMARecordPointer.OFFSET_BASE_SSTABLE_ID, baseSstableId);
         mem.setLong(offset + HMARecordPointer.OFFSET_BASE_DATA_OFFSET, baseDataOffset);
     }
@@ -437,6 +465,8 @@ public final class HMAPrimaryIndexShard implements AutoCloseable
                 int dataLength = oldMemory.getInt(oldOffset + HMARecordPointer.OFFSET_DATA_LENGTH);
                 int generation = oldMemory.getInt(oldOffset + HMARecordPointer.OFFSET_GENERATION);
                 long timestamp = oldMemory.getLong(oldOffset + HMARecordPointer.OFFSET_TIMESTAMP);
+                byte extFlags = oldMemory.getByte(oldOffset + HMARecordPointer.OFFSET_EXT_FLAGS);
+                int firstDeltaSstableId = HMARecordPointer.readUnsignedShort(oldMemory, oldOffset + HMARecordPointer.OFFSET_FIRST_DELTA_SSTABLE_ID);
                 int baseSstableId = oldMemory.getInt(oldOffset + HMARecordPointer.OFFSET_BASE_SSTABLE_ID);
                 long baseDataOffset = oldMemory.getLong(oldOffset + HMARecordPointer.OFFSET_BASE_DATA_OFFSET);
 
@@ -447,7 +477,7 @@ public final class HMAPrimaryIndexShard implements AutoCloseable
                 }
 
                 long destOffset = (long) newIdx * HMARecordPointer.ENTRY_SIZE;
-                writeEntry(newMemory, destOffset, hi, lo, sstableId, dataOffset, dataLength, timestamp, generation, flags, baseSstableId, baseDataOffset);
+                writeEntry(newMemory, destOffset, hi, lo, sstableId, dataOffset, dataLength, timestamp, generation, flags, extFlags, firstDeltaSstableId, baseSstableId, baseDataOffset);
             }
         }
 

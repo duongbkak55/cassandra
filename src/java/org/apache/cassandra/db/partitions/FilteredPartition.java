@@ -22,8 +22,10 @@ import java.util.Iterator;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.DeletionInfo;
 import org.apache.cassandra.db.RegularAndStaticColumns;
+import org.apache.cassandra.db.rows.EncodingStats;
 import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.rows.RowIterator;
+import org.apache.cassandra.db.rows.Rows;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.utils.btree.BTree;
 
@@ -32,6 +34,25 @@ public class FilteredPartition extends ImmutableBTreePartition
     public FilteredPartition(RowIterator rows)
     {
         super(rows.metadata(), rows.partitionKey(), build(rows, DeletionInfo.LIVE, false));
+    }
+
+    public FilteredPartition(TableMetadata metadata, DecoratedKey partitionKey, BTreePartitionData holder)
+    {
+        super(metadata, partitionKey, holder);
+    }
+
+    public static FilteredPartition fromSingleRow(TableMetadata metadata,
+                                                  DecoratedKey partitionKey,
+                                                  RegularAndStaticColumns columns,
+                                                  Row row,
+                                                  EncodingStats stats)
+    {
+        BTreePartitionData holder = new BTreePartitionData(columns,
+                                                           BTree.singleton(row),
+                                                           DeletionInfo.LIVE,
+                                                           Rows.EMPTY_STATIC_ROW,
+                                                           stats);
+        return new FilteredPartition(metadata, partitionKey, holder);
     }
 
     /**

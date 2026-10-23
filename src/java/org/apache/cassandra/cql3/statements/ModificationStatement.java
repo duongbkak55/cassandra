@@ -927,6 +927,15 @@ public abstract class ModificationStatement implements CQLStatement.SingleKeyspa
 
     static RowIterator casInternal(ClientState state, CQL3CasRequest request, long timestamp, long nowInSeconds)
     {
+        if (org.apache.cassandra.io.sstable.format.hma.HMAFastCasEngine.canExecuteFastCas(
+                request.metadata, request.key, ConsistencyLevel.LOCAL_SERIAL, ConsistencyLevel.LOCAL_ONE))
+        {
+            return org.apache.cassandra.io.sstable.format.hma.HMAFastCasEngine.executeCas(
+                    request.metadata, request.key, request,
+                    ConsistencyLevel.LOCAL_SERIAL, ConsistencyLevel.LOCAL_ONE,
+                    state, nowInSeconds, Dispatcher.RequestTime.forImmediateExecution(), null);
+        }
+
         Ballot ballot = BallotGenerator.Global.atUnixMicros(timestamp, NONE);
 
         SinglePartitionReadQuery readCommand = request.readCommand(nowInSeconds);
