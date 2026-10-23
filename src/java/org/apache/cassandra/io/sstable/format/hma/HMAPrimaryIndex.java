@@ -40,7 +40,8 @@ import org.apache.cassandra.utils.FBUtilities;
  */
 public final class HMAPrimaryIndex implements AutoCloseable
 {
-    private static final int DEFAULT_SHARD_COUNT = Math.max(16, FBUtilities.getAvailableProcessors() * 4);
+    private static final int DEFAULT_SHARD_COUNT = Integer.getInteger("cassandra.hma.index.shards", Math.max(64, FBUtilities.getAvailableProcessors() * 16));
+    private static final int DEFAULT_INITIAL_SHARD_CAPACITY = Integer.getInteger("cassandra.hma.index.initial_shard_capacity", 1024);
     public static final int DEFAULT_DEFRAG_LWM_PCT = Integer.getInteger("cassandra.hma.defrag.lwm_pct", 50);
     public static final int DEFAULT_BLOCK_SIZE_BYTES = Integer.getInteger("cassandra.hma.defrag.block_size_kb", 1024) * 1024;
 
@@ -68,7 +69,7 @@ public final class HMAPrimaryIndex implements AutoCloseable
 
     public HMAPrimaryIndex()
     {
-        this(DEFAULT_SHARD_COUNT, 1024);
+        this(DEFAULT_SHARD_COUNT, DEFAULT_INITIAL_SHARD_CAPACITY);
     }
 
     public HMAPrimaryIndex(int numShards, int initialCapacityPerShard)
@@ -105,8 +106,23 @@ public final class HMAPrimaryIndex implements AutoCloseable
     {
         long[] hash = threadLocalHashBuffer.get();
         HMARecordPointer.computeKeyHash(key, hash);
-        int shardIdx = selectShard(hash[0], hash[1]);
-        return shards[shardIdx].put(hash[0], hash[1], sstableId, dataOffset, dataLength, timestamp, generation, flags, this);
+        return putHash(hash[0], hash[1], sstableId, dataOffset, dataLength, timestamp, generation, flags);
+    }
+
+    /**
+     * Store or update a record pointer using pre-computed 128-bit Murmur3 key hash.
+     */
+    public boolean putHash(long hashHi,
+                           long hashLo,
+                           long sstableId,
+                           long dataOffset,
+                           int dataLength,
+                           long timestamp,
+                           int generation,
+                           byte flags)
+    {
+        int shardIdx = selectShard(hashHi, hashLo);
+        return shards[shardIdx].put(hashHi, hashLo, sstableId, dataOffset, dataLength, timestamp, generation, flags, this);
     }
 
     /**

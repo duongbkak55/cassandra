@@ -17,6 +17,9 @@
  */
 package org.apache.cassandra.io.sstable.format.hma;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -57,10 +60,26 @@ public class HMAFlushObserver implements SSTableFlushObserver
 {
     private static final Logger logger = LoggerFactory.getLogger(HMAFlushObserver.class);
 
+    private static final int CHUNK_SIZE = 4096;
+
+    private static final class PendingChunk
+    {
+        final long[] hashHi = new long[CHUNK_SIZE];
+        final long[] hashLo = new long[CHUNK_SIZE];
+        final long[] dataOffset = new long[CHUNK_SIZE];
+        final int[] dataLength = new int[CHUNK_SIZE];
+        final long[] timestamp = new long[CHUNK_SIZE];
+        final byte[] flags = new byte[CHUNK_SIZE];
+        int count = 0;
+    }
+
     private final HMAPrimaryIndex index;
     private final long sstableId;
     private final TableId tableId;
     private final int expectedSingleRowColumns;
+    private final long[] hashBuffer = new long[2];
+    private final List<PendingChunk> pendingChunks = new ArrayList<>(4);
+    private PendingChunk activeChunk;
 
     // State during partition write
     private DecoratedKey currentKey;
@@ -230,8 +249,9 @@ public class HMAFlushObserver implements SSTableFlushObserver
     @Override
     public void complete()
     {
-        // Flush the last buffered partition if present
+        // Flush the last buffered partition if present, then commit all buffered index entries
         flushCurrentPartition(0);
+        commitPendingEntries();
         index.markSSTableSealed(sstableId);
 
         if (logger.isDebugEnabled())
@@ -254,6 +274,7 @@ public class HMAFlushObserver implements SSTableFlushObserver
     public void onSSTableWriterSwitched()
     {
         flushCurrentPartition(0);
+        commitPendingEntries();
     }
 
     @Override
@@ -263,7 +284,10 @@ public class HMAFlushObserver implements SSTableFlushObserver
         currentMaxTimestamp = Long.MIN_VALUE;
         currentIsMultiBlock = false;
         currentHasPrimaryKeyLiveness = false;
+        currentHasPartitionDeletion = false;
         currentColumnCount = 0;
+        pendingChunks.clear();
+        activeChunk = null;
     }
 
     public int getIndexedPartitionCount()
@@ -272,7 +296,8 @@ public class HMAFlushObserver implements SSTableFlushObserver
     }
 
     /**
-     * Flush the current partition into the HMA index.
+     * Buffer the current partition entry so it is atomically published to the HMA index
+     * only when the SSTable write finishes in {@link #complete()}.
      *
      * @param estimatedLength serialized byte length of the partition data in Data.db.
      */
@@ -299,13 +324,21 @@ public class HMAFlushObserver implements SSTableFlushObserver
             flags |= HMARecordPointer.FLAG_COMPLETE_OVERWRITE;
         }
 
-        index.put(currentKey,
-                  sstableId,
-                  currentKeyPosition,
-                  dataLength,
-                  timestamp,
-                  0,
-                  flags);
+        HMARecordPointer.computeKeyHash(currentKey, hashBuffer);
+        PendingChunk chunk = activeChunk;
+        if (chunk == null || chunk.count == CHUNK_SIZE)
+        {
+            chunk = new PendingChunk();
+            pendingChunks.add(chunk);
+            activeChunk = chunk;
+        }
+        int idx = chunk.count++;
+        chunk.hashHi[idx] = hashBuffer[0];
+        chunk.hashLo[idx] = hashBuffer[1];
+        chunk.dataOffset[idx] = currentKeyPosition;
+        chunk.dataLength[idx] = dataLength;
+        chunk.timestamp[idx] = timestamp;
+        chunk.flags[idx] = flags;
 
         partitionCount++;
         currentKey = null;
@@ -314,5 +347,29 @@ public class HMAFlushObserver implements SSTableFlushObserver
         currentHasPrimaryKeyLiveness = false;
         currentHasPartitionDeletion = false;
         currentColumnCount = 0;
+    }
+
+    private void commitPendingEntries()
+    {
+        if (pendingChunks.isEmpty())
+            return;
+
+        for (int c = 0, n = pendingChunks.size(); c < n; c++)
+        {
+            PendingChunk chunk = pendingChunks.get(c);
+            for (int i = 0, m = chunk.count; i < m; i++)
+            {
+                index.putHash(chunk.hashHi[i],
+                              chunk.hashLo[i],
+                              sstableId,
+                              chunk.dataOffset[i],
+                              chunk.dataLength[i],
+                              chunk.timestamp[i],
+                              0,
+                              chunk.flags[i]);
+            }
+        }
+        pendingChunks.clear();
+        activeChunk = null;
     }
 }

@@ -121,5 +121,22 @@ public class HMAFastCasEngineTest extends CQLTester
         assertEquals(1, winners.get());
         UntypedResultSet check2 = execute("SELECT version FROM %s WHERE pk = ?", "user-1");
         assertEquals(3L, check2.one().getLong("version"));
+
+        // 4. Flush and verify full-row merge preserves all non-updated columns across SSTables
+        flush();
+        execute("SELECT version FROM %s WHERE pk = ?", "user-1");
+        UntypedResultSet rs3 = execute("UPDATE %s SET version = ?, balance[?] = ? WHERE pk = ? IF version = ?",
+                                       4L, "b0", 3000L, "user-1", 3L);
+        assertTrue(rs3.one().getBoolean("[applied]"));
+        flush();
+
+        UntypedResultSet fullRow = execute("SELECT pk, version, balance, profile FROM %s WHERE pk = ?", "user-1");
+        UntypedResultSet.Row r = fullRow.one();
+        assertNotNull(r);
+        assertEquals(4L, r.getLong("version"));
+        Map<String, Long> finalBal = r.getMap("balance", org.apache.cassandra.db.marshal.UTF8Type.instance, org.apache.cassandra.db.marshal.LongType.instance);
+        assertEquals(Long.valueOf(3000L), finalBal.get("b0"));
+        assertEquals(Long.valueOf(2000L), finalBal.get("b1"));
+        assertEquals(3800, r.getBytes("profile").remaining());
     }
 }

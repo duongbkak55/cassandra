@@ -268,9 +268,6 @@ public class CQL3CasRequest implements CASRequest
 
     private RegularAndStaticColumns columnsToRead()
     {
-        if (org.apache.cassandra.io.sstable.format.hma.HMAFastCasEngine.isEnabled() && canProjectOnlyConditionColumns())
-            return conditionColumns;
-
         RegularAndStaticColumns allColumns = metadata.regularAndStaticColumns();
 
         // If we update static row, we won't have any conditions on regular rows.

@@ -314,6 +314,7 @@ public final class HMAFastCasEngine
         {
             // 1. Read current partition state from stripe pre-read cache or local HMA storage engine
             SinglePartitionReadCommand readCommand = request.readCommand(nowInSeconds);
+            final boolean fetchesAllRegulars = fetchesAllRegularColumns(readCommand, metadata);
             FilteredPartition current = null;
             final int cacheSlot = stripe & CACHE_MASK;
             CachedPreImage cached = STRIPE_CACHE.get(cacheSlot);
@@ -322,7 +323,7 @@ public final class HMAFastCasEngine
                 && (STRIPE_WRITE_SEQ.get(stripe) & 1L) == 0L
                 && cached.tableId.equals(metadata.id)
                 && Math.abs(nowInSeconds - cached.cachedAtSec) <= 1L
-                && readCommand.columnFilter().fetchesAllColumns(false)
+                && fetchesAllRegulars
                 && readCommand.clusteringIndexFilter().selectsAllPartition()
                 && cached.key.equals(key))
             {
@@ -385,7 +386,7 @@ public final class HMAFastCasEngine
                 && !current.isEmpty()
                 && updates.partitionLevelDeletion().isLive()
                 && updates.rowCount() == 1
-                && readCommand.columnFilter().fetchesAllColumns(false))
+                && fetchesAllRegulars)
             {
                 Row currentRow = current.getAtIdx(0);
                 Row deltaRow = updates.iterator().next();
@@ -451,5 +452,11 @@ public final class HMAFastCasEngine
         {
             lock.unlock();
         }
+    }
+
+    private static boolean fetchesAllRegularColumns(SinglePartitionReadCommand readCommand, TableMetadata metadata)
+    {
+        return readCommand.columnFilter().fetchesAllColumns(false)
+               || readCommand.columnFilter().fetchedColumns().regulars.equals(metadata.regularAndStaticColumns().regulars);
     }
 }

@@ -93,6 +93,8 @@ public class HMAOffHeapMemtable extends AbstractAllocatorMemtable
 
     private static final EnsureOnHeap ON_HEAP_CLONER = new EnsureOnHeap.CloneToHeap();
     private static final int PARTITION_HEAP_OVERHEAD = 96;
+    private static final int OFFHEAP_QUOTA_DIVISOR = Math.max(1, Integer.getInteger("cassandra.hma.memtable.offheap_divisor", 2));
+    private static final long MAX_OFFHEAP_MEMTABLE_BYTES = Math.max(32L, Long.getLong("cassandra.hma.memtable.max_offheap_mb", 256L)) * 1024L * 1024L;
 
     private static final AtomicLong DIRECT_LOOKUP_HITS = new AtomicLong(0);
     private static final AtomicLong DIRECT_LOOKUP_MISSES = new AtomicLong(0);
@@ -116,6 +118,7 @@ public class HMAOffHeapMemtable extends AbstractAllocatorMemtable
 
     private final AtomicLong liveDataSize = new AtomicLong(0);
     private final AtomicBoolean arenaClosed = new AtomicBoolean(false);
+    private final AtomicBoolean offHeapCeilingFlushScheduled = new AtomicBoolean(false);
 
     public HMAOffHeapMemtable(AtomicReference<CommitLogPosition> commitLogLowerBound,
                               TableMetadataRef metadataRef,
@@ -193,11 +196,16 @@ public class HMAOffHeapMemtable extends AbstractAllocatorMemtable
         }
 
         BTreePartitionUpdater updater = previous.addAll(update, cloner, opGroup, indexer);
-        long opArenaQuota = cloner.allocatedBytes() / 6;
+        long opArenaQuota = cloner.allocatedBytes() / OFFHEAP_QUOTA_DIVISOR;
         if (opArenaQuota > 0)
         {
-            // Scale off-heap arena allocation by 1/6 against the ~112 MB on-heap threshold so off-heap memtables auto-flush at ~672 MB
+            // Scale off-heap arena allocation against the on-heap threshold so off-heap memtables auto-flush predictably
             allocator.onHeap().allocate(opArenaQuota);
+        }
+        if (arena.allocatedBytes() >= MAX_OFFHEAP_MEMTABLE_BYTES
+            && offHeapCeilingFlushScheduled.compareAndSet(false, true))
+        {
+            owner.signalFlushRequired(this, ColumnFamilyStore.FlushReason.MEMTABLE_LIMIT);
         }
 
         updateMin(minTimestamp, update.stats().minTimestamp);

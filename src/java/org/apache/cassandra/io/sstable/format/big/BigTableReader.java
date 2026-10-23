@@ -321,12 +321,6 @@ public class BigTableReader extends SSTableReaderWithFilter implements IndexSumm
                         notifySelected(SelectionReason.INDEX_ENTRY_FOUND, listener, operator, updateStats, indexEntry);
                         return indexEntry;
                     }
-                    else if (!ptr.isMultiSSTable())
-                    {
-                        hmaIndex.recordDirectReadBypass();
-                        notifySkipped(SkippingReason.BLOOM_FILTER, listener, operator, updateStats);
-                        return null;
-                    }
                 }
             }
             if (!isPresentInFilter((IFilter.FilterKey) key))

@@ -107,3 +107,77 @@ Với [`HMAFastCasEngine.java`](file:///Users/duongnguyen/Projects/cassandra/cas
 | **Phần 4: Streaming Write Buffer** | `CommitLogBypassedCount` / `StreamingBufferFlushes` | **`112,416` writes / `20` flushes** | Ghi 1 lần (Single-Write) `159.9 MiB` thẳng xuống SSTable với độ trễ ghi nội bộ **`18 µs` (`0.018 ms`)**. |
 | **Phần 5: Off-Heap Arena & Memtable** | `OffHeapArenaCreatedCount` / `ClosedCount` / `ActiveBytes` | **`29` created / `28` closed / `0 B` active** | Cấp phát tổng cộng **`2.99 GiB`** (`OffHeapArenaTotalBytesAllocated = 3,210,739,712 B`), thu hồi sạch 100% slab sau khi flush. |
 | **Phần 6: Fast-CAS Engine** | `FastCasEnabled` / `FastCasSuccessCount` / `FastCasConditionNotMetCount` | **`true` / `440,280` thành công / `165` conflict** | 440.280 giao dịch LWT CAS hoàn tất trong 1 pha khóa phân vùng + Seqlock Pre-Image Cache, đẩy thông lượng `b1-cas-on-c16` tăng **3.34x** (`19,714.5 TPS`). |
+
+---
+
+## 6. Hướng dẫn Sizing & Cấu hình Tối ưu cho 1 Triệu Bản ghi (`1M Records`, `~5 GiB`) & 10 Triệu Bản ghi (`10M Records`, `~50 GiB`)
+
+### 6.1. Bảng Phân bổ Bộ nhớ (JVM Heap vs. Off-Heap Index vs. Off-Heap Memtable)
+
+| Thành phần Bộ nhớ | Công thức Tính toán | **1M Records (`~5 GiB` dữ liệu)**<br>*(Profile Tiết kiệm 4 GB RAM)* | **1M Records (`~5 GiB` dữ liệu)**<br>*(Profile Khuyến nghị 8 GB RAM)* | **10M Records (`~50 GiB` dữ liệu)**<br>*(Profile Khuyến nghị 16 GB RAM)* |
+| :--- | :--- | :---: | :---: | :---: |
+| **RAM Container (`--memory`)** | Tổng ngân sách RAM vật lý / cgroup | **`4g`** *(tối thiểu)* | **`8g`** *(khuyến nghị)* | **`16g`** |
+| **JVM Max Heap (`MAX_HEAP_SIZE`)** | `35% – 45%` RAM container | **`1792M`** *(1.75 GiB)* | **`3G`** *(3.0 GiB)* | **`6G`** *(6.0 GiB)* |
+| **JVM Young Gen (`HEAP_NEWSIZE`)** | `~25% – 30%` `MAX_HEAP_SIZE` | **`512M`** | **`800M`** | **`1536M`** *(1.5 GiB)* |
+| **HMA Off-Heap Primary Index** | `64 B × nextPow2(keys / 0.70)` | **`128 MiB`** *(2,097,152 slots)* | **`128 MiB`** *(2,097,152 slots)* | **`1,024 MiB`** *(16,777,216 slots)* |
+| **HMA Off-Heap Memtable (`max_offheap_mb`)** | Active + 1 Memtable đang flush | **`192 MiB`** *(đỉnh ×2 = 384 MiB)* | **`256 MiB`** *(đỉnh ×2 = 512 MiB)* | **`512 MiB`** *(đỉnh ×2 = 1 GiB)* |
+| **HMA Off-Heap Arena Pool (`max_pooled_slabs`)** | `max_pooled_slabs × 1 MiB` | **`64 MiB`** *(`64` slabs)* | **`128 MiB`** *(`128` slabs)* | **`256 MiB`** *(`256` slabs)* |
+| **Direct ByteBuffers / Netty / Native JVM** | NIO + Thread stacks + Bloom Filters | `~350 MiB` | `~512 MiB` | `~1.0 GiB` |
+| **OS Page Cache / Direct I/O Headroom** | Phần RAM còn lại cho I/O & Compaction | `~1.2 GiB` | **`~3.7 GiB`** | **`~6.2 GiB`** |
+
+### 6.2. Lệnh Khởi chạy Docker Tối ưu cho 1 Triệu Bản ghi (`1M Records × 5 KiB`)
+
+#### Cấu hình Khuyến nghị (Container `8 GB RAM`, `MAX_HEAP_SIZE=3G`, Pre-allocated 1M Index):
+Cấp phát sẵn `64` shards × `32.768` slots (`128 MiB` Off-Heap Index) ngay khi tạo bảng để **không phải resize bảng băm** khi nạp vượt mốc `716.800` keys:
+
+```bash
+docker run -d \
+  --name cassandra-hma-1m \
+  --cpus=4 --memory=8g --memory-swap=8g \
+  -p 9042:9042 \
+  -e MAX_HEAP_SIZE=3G \
+  -e HEAP_NEWSIZE=800M \
+  -e JVM_EXTRA_OPTS="\
+    -Dcassandra.hma.enabled=true \
+    -Dcassandra.hma.index.shards=64 \
+    -Dcassandra.hma.index.initial_shard_capacity=32768 \
+    -Dcassandra.hma.memtable.auto_enable=true \
+    -Dcassandra.hma.memtable.max_offheap_mb=256 \
+    -Dcassandra.hma.memtable.offheap_divisor=2 \
+    -Dcassandra.hma.arena.max_pooled_slabs=128 \
+    -Dcassandra.hma.fast_cas.enabled=true \
+    -Dcassandra.hma.defrag.enabled=true" \
+  duongbkak55/cassandra-hma:v7.0.0-hma.2
+```
+
+#### Cấu hình Giới hạn `4 GB RAM` (`MAX_HEAP_SIZE=1792M`, `max_offheap_mb=192`):
+```bash
+docker run -d \
+  --name cassandra-hma-1m-4g \
+  --cpus=4 --memory=4g --memory-swap=4g \
+  -p 9042:9042 \
+  -e MAX_HEAP_SIZE=1792M \
+  -e HEAP_NEWSIZE=512M \
+  -e JVM_EXTRA_OPTS="\
+    -Dcassandra.hma.enabled=true \
+    -Dcassandra.hma.index.shards=64 \
+    -Dcassandra.hma.index.initial_shard_capacity=32768 \
+    -Dcassandra.hma.memtable.auto_enable=true \
+    -Dcassandra.hma.memtable.max_offheap_mb=192 \
+    -Dcassandra.hma.memtable.offheap_divisor=2 \
+    -Dcassandra.hma.arena.max_pooled_slabs=64 \
+    -Dcassandra.hma.fast_cas.enabled=true \
+    -Dcassandra.hma.defrag.enabled=true" \
+  duongbkak55/cassandra-hma:v7.0.0-hma.2
+```
+
+### 6.3. Lưu ý Quan trọng ở Phía Client `kvbench` (`conf/cassandra-b1-5k-1m.yaml`)
+
+1. **Đồng bộ `run.load.records: 1000000` và `keys.count: 1000000`**:
+   - Nếu dùng file mẫu 10M (`keys.count: 10000000`) mà chỉ sửa `load.records: 1000000`, pha `run` sẽ sinh khóa ngẫu nhiên trong dải `0 .. 9.999.999` khiến **90% lượt đọc rơi vào khóa chưa từng nạp** $\rightarrow$ báo `not found`. File [`conf/cassandra-b1-5k-1m.yaml`](file:///Users/duongnguyen/Projects/cassandra/kvbench/conf/cassandra-b1-5k-1m.yaml) đã được cấu hình đồng bộ cả hai tham số này ở mức `1000000`.
+2. **Đặt `requestTimeoutMs: 5000`, `load.concurrency: 128`, `pool.localConnections: 4` và `retryPolicy: default`**:
+   - Nạp 1 triệu bản ghi × 5 KiB (`~5.2 GiB`) kích hoạt liên tiếp ~20 đợt flush Memtable và L0 $\rightarrow$ L1 Compaction. Tăng `requestTimeoutMs` từ `1000` lên `5000` ms và bật `retryPolicy: default` loại bỏ triệt để lỗi timeout nhất thời (`Other error`) khi nạp.
+3. **Các bản vá ổn định ở quy mô 1M+ bản ghi (đã tích hợp trong `v7.0.0-hma.2`)**:
+   - **Commit nguyên tử `HMAFlushObserver.complete()` & loại bỏ Negative-Skip sớm trong `BigTableReader` / `BtiTableReader`**: Ngăn chặn hoàn toàn hiện tượng `not found` giả khi đọc song song lúc Compaction đang ghi SSTable mới.
+   - **Cập nhật `baseSstableId` khi Base SSTable được Compact (`HMAPrimaryIndexShard`) & bỏ `hmaBaseCompleteCutoff` (`SinglePartitionReadCommand`)**: Giữ nguyên chuỗi nhảy 2-SSTable chính xác ngay cả khi Base SSTable cũ được gộp sang SSTable mới có ID lớn hơn Delta SSTable.
+   - **Kích hoạt chính xác Full-Row Merge trong `HMAFastCasEngine` & chặn lưu Pre-Read thiếu cột (`SinglePartitionReadCommand`)**: Khắc phục điều kiện `SelectionColumnFilter.fetchesAllColumns(false)` luôn trả về `false` trong `CQL3CasRequest`, đảm bảo `UPDATE ... IF gen = ?` luôn gộp đủ 10/10 cột và không bao giờ làm mất các cột không nằm trong mệnh đề `SET`.

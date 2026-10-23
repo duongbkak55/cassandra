@@ -336,12 +336,6 @@ public class BtiTableReader extends SSTableReaderWithFilter
                         }
                     }
                 }
-                else if (!ptr.isMultiSSTable())
-                {
-                    hmaIndex.recordDirectReadBypass();
-                    notifySkipped(SkippingReason.BLOOM_FILTER, listener, EQ, updateStats);
-                    return ExactPosition.NOT_FOUND;
-                }
             }
         }
 

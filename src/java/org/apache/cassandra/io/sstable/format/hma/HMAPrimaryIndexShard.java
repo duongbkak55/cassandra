@@ -250,6 +250,23 @@ public final class HMAPrimaryIndexShard implements AutoCloseable
                                 HMARecordPointer.writeUnsignedShort(mem, offset + HMARecordPointer.OFFSET_FIRST_DELTA_SSTABLE_ID, 0);
                                 mem.setByte(offset + HMARecordPointer.OFFSET_FLAGS, updatedFlags);
                             }
+                            else if (incomingComplete
+                                     && (slotFlags & HMARecordPointer.FLAG_TWO_SSTABLE) != 0
+                                     && (slotFlags & HMARecordPointer.FLAG_MULTI_BLOCK) == 0
+                                     && (flags & HMARecordPointer.FLAG_MULTI_BLOCK) == 0
+                                     && sstableId > 0 && sstableId <= Integer.MAX_VALUE
+                                     && sstableId > existingBaseSstableId)
+                            {
+                                byte updatedFlags = (byte) (slotFlags
+                                                            | HMARecordPointer.FLAG_MULTI_SSTABLE
+                                                            | HMARecordPointer.FLAG_TWO_SSTABLE
+                                                            | HMARecordPointer.FLAG_BASE_COMPLETE);
+                                mem.setInt(offset + HMARecordPointer.OFFSET_BASE_SSTABLE_ID, (int) sstableId);
+                                mem.setLong(offset + HMARecordPointer.OFFSET_BASE_DATA_OFFSET, dataOffset);
+                                mem.setByte(offset + HMARecordPointer.OFFSET_EXT_FLAGS, (byte) 0);
+                                HMARecordPointer.writeUnsignedShort(mem, offset + HMARecordPointer.OFFSET_FIRST_DELTA_SSTABLE_ID, 0);
+                                mem.setByte(offset + HMARecordPointer.OFFSET_FLAGS, updatedFlags);
+                            }
                             else if ((slotFlags & HMARecordPointer.FLAG_BASE_COMPLETE) == 0
                                      || existingBaseSstableId <= 0
                                      || sstableId > existingBaseSstableId)
@@ -257,7 +274,8 @@ public final class HMAPrimaryIndexShard implements AutoCloseable
                                 mem.setByte(offset + HMARecordPointer.OFFSET_EXT_FLAGS,
                                             (byte) (existingExtFlags & ~HMARecordPointer.EXT_FLAG_THREE_SSTABLE));
                                 mem.setByte(offset + HMARecordPointer.OFFSET_FLAGS,
-                                            (byte) ((slotFlags | HMARecordPointer.FLAG_MULTI_SSTABLE) & ~HMARecordPointer.FLAG_TWO_SSTABLE));
+                                            (byte) ((slotFlags | HMARecordPointer.FLAG_MULTI_SSTABLE)
+                                                    & ~(HMARecordPointer.FLAG_TWO_SSTABLE | HMARecordPointer.FLAG_BASE_COMPLETE)));
                             }
                         }
                         if (owner != null && sstableId != 0L && !samePhysicalRecord && (flags & HMARecordPointer.FLAG_TOMBSTONE) == 0)
@@ -288,7 +306,26 @@ public final class HMAPrimaryIndexShard implements AutoCloseable
                                                   | HMARecordPointer.FLAG_TWO_SSTABLE
                                                   | HMARecordPointer.FLAG_BASE_COMPLETE));
                     }
-                    else if (!isDefragOrCompactionMove)
+                    else if (isDefragOrCompactionMove)
+                    {
+                        if ((slotFlags & HMARecordPointer.FLAG_MULTI_SSTABLE) != 0)
+                        {
+                            mergedFlags |= HMARecordPointer.FLAG_MULTI_SSTABLE;
+                            if ((slotFlags & HMARecordPointer.FLAG_TWO_SSTABLE) != 0
+                                && (flags & HMARecordPointer.FLAG_MULTI_BLOCK) == 0
+                                && existingBaseSstableId > 0
+                                && existingBaseSstableId != sstableId
+                                && existingBaseDataOffset >= 0)
+                            {
+                                mergedFlags |= HMARecordPointer.FLAG_TWO_SSTABLE;
+                                if ((slotFlags & HMARecordPointer.FLAG_BASE_COMPLETE) != 0)
+                                    mergedFlags |= HMARecordPointer.FLAG_BASE_COMPLETE;
+                                newBaseSstableId = existingBaseSstableId;
+                                newBaseDataOffset = existingBaseDataOffset;
+                            }
+                        }
+                    }
+                    else
                     {
                         if (!differentSstable)
                         {

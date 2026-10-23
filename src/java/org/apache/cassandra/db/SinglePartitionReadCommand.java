@@ -845,7 +845,6 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
             boolean hmaSingleTarget = false;
             boolean hmaTwoTarget = false;
             boolean hmaThreeTarget = false;
-            boolean hmaBaseCompleteCutoff = false;
             if (hmaIndex != null
                 && view.sstables.size() > 1
                 && !controller.isTrackingRepairedStatus()
@@ -883,13 +882,16 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
                         }
                         if (foundPrimary && foundBase)
                         {
-                            hmaPtr = candidate;
                             if (candidate.isTwoSSTable())
+                            {
+                                hmaPtr = candidate;
                                 hmaTwoTarget = true;
+                            }
                             else if (candidate.isThreeSSTable() && foundFirstDelta)
+                            {
+                                hmaPtr = candidate;
                                 hmaThreeTarget = true;
-                            else if (candidate.isBaseComplete())
-                                hmaBaseCompleteCutoff = true;
+                            }
                         }
                     }
                 }
@@ -919,16 +921,6 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
                     {
                         nonIntersectingSSTables++;
                         continue;
-                    }
-                    if (hmaBaseCompleteCutoff && sid > 0)
-                    {
-                        if (sid < hmaPtr.baseSstableId
-                            || (hmaPtr.sstableId > 0 && sid > hmaPtr.sstableId)
-                            || (hmaPtr.firstDeltaSstableId > 0 && sid < hmaPtr.firstDeltaSstableId && sid != hmaPtr.baseSstableId))
-                        {
-                            nonIntersectingSSTables++;
-                            continue;
-                        }
                     }
                 }
 
@@ -1214,7 +1206,6 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
         boolean hmaSingleTarget = false;
         boolean hmaTwoTarget = false;
         boolean hmaThreeTarget = false;
-        boolean hmaBaseCompleteCutoff = false;
         if (hmaIndex != null && view.sstables.size() > 1 && !controller.isTrackingRepairedStatus())
         {
             HMARecordPointer candidate = HMA_READ_POINTER_TL.get();
@@ -1249,21 +1240,26 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
                     }
                     if (foundPrimary && foundBase)
                     {
-                        hmaPtr = candidate;
                         if (candidate.isTwoSSTable())
+                        {
+                            hmaPtr = candidate;
                             hmaTwoTarget = true;
+                        }
                         else if (candidate.isThreeSSTable() && foundFirstDelta)
+                        {
+                            hmaPtr = candidate;
                             hmaThreeTarget = true;
-                        else if (candidate.isBaseComplete())
-                            hmaBaseCompleteCutoff = true;
+                        }
                     }
                 }
             }
         }
 
         // read sorted sstables
-        for (SSTableReader sstable : view.sstables)
+        boolean stoppedEarlyByReduceFilter = false;
+        for (int sstableIdx = 0, sstableCount = view.sstables.size(); sstableIdx < sstableCount; sstableIdx++)
         {
+            SSTableReader sstable = view.sstables.get(sstableIdx);
             if (hmaPtr != null)
             {
                 long sid = HMARecordPointer.resolveSSTableId(sstable.descriptor);
@@ -1282,16 +1278,6 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
                     hmaIndex.recordDirectReadBypass();
                     continue;
                 }
-                if (hmaBaseCompleteCutoff && sid > 0)
-                {
-                    if (sid < hmaPtr.baseSstableId
-                        || (hmaPtr.sstableId > 0 && sid > hmaPtr.sstableId)
-                        || (hmaPtr.firstDeltaSstableId > 0 && sid < hmaPtr.firstDeltaSstableId && sid != hmaPtr.baseSstableId))
-                    {
-                        hmaIndex.recordDirectReadBypass();
-                        continue;
-                    }
-                }
             }
             // if we've already seen a partition tombstone with a timestamp greater
             // than the most recent update to this sstable, we're done, since the rest of the sstables
@@ -1303,7 +1289,11 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
             filter = reduceFilter(filter, result, currentMaxTs);
 
             if (filter == null)
+            {
+                if (!hmaSingleTarget)
+                    stoppedEarlyByReduceFilter = true;
                 break;
+            }
 
             boolean intersects = intersects(sstable);
             boolean hasRequiredStatics = hasRequiredStatics(sstable);
@@ -1376,7 +1366,7 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
         cfs.metric.topReadPartitionSSTableCount.addSample(key.getKey(), metricsCollector.getMergedSSTables());
         StorageHook.instance.reportRead(cfs.metadata.id, partitionKey());
 
-        if (canCachePreRead && (hmaSeqBefore & 1L) == 0L)
+        if (canCachePreRead && !stoppedEarlyByReduceFilter && (hmaSeqBefore & 1L) == 0L)
         {
             try (org.apache.cassandra.db.rows.RowIterator filteredIter = UnfilteredRowIterators.filter(result.unfilteredIterator(columnFilter(), Slices.ALL, false),
                                                                                                        nowInSec()))

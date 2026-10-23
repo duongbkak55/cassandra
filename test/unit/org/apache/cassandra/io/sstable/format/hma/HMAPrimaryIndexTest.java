@@ -359,6 +359,19 @@ public class HMAPrimaryIndexTest
             Assert.assertTrue(ptr.isBaseComplete());
             Assert.assertEquals(5, ptr.baseSstableId);
             Assert.assertEquals(4096L, ptr.baseDataOffset);
+
+            // 4. Verify base SSTable compaction transition (base #5 compacted into #8 while delta #6 is primary)
+            DecoratedKey k2 = key("base_compacted_key");
+            index.put(k2, 5L, 1024L, 256, 1000L, 1, completeFlags);
+            index.put(k2, 6L, 2048L, 64, 2000L, 2, HMARecordPointer.FLAG_IN_USE);
+            // Older base #5 (ts=1000) is compacted into SSTable #8 at offset 512
+            index.put(k2, 8L, 512L, 256, 1000L, 1, completeFlags);
+
+            Assert.assertTrue(index.lookup(k2, ptr));
+            Assert.assertEquals(6L, ptr.sstableId);
+            Assert.assertTrue(ptr.isTwoSSTable());
+            Assert.assertEquals(8, ptr.baseSstableId);
+            Assert.assertEquals(512L, ptr.baseDataOffset);
         }
         finally
         {
