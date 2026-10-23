@@ -23,10 +23,12 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 cd "${ROOT_DIR}"
 
-if [[ ! -f "build/apache-cassandra-7.0-SNAPSHOT.jar" ]]; then
-  echo "[1/3] Building Apache Cassandra 7.0 HMA main jar..."
-  ant _main-jar -Dno-resolver=true -Dno-build-accord=true -Dno-checkstyle=true
+if [[ -x "/usr/libexec/java_home" ]] && /usr/libexec/java_home -v 17 >/dev/null 2>&1; then
+  export JAVA_HOME="$(/usr/libexec/java_home -v 17)"
 fi
+
+echo "[1/3] Building Apache Cassandra 7.0 HMA main jar..."
+ant _main-jar -Dno-resolver=true -Dno-build-accord=true -Dno-checkstyle=true
 
 echo "[2/3] Logging in to Docker Hub..."
 printf "%s" "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
