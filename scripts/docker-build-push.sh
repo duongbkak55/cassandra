@@ -40,6 +40,44 @@ docker build --platform linux/amd64 \
 docker push "${IMAGE_REPO}:${VERSION_TAG}"
 docker push "${IMAGE_REPO}:${EXTRA_TAG}"
 
+if [[ -f "doc/HMA_DOCKER_AND_CONFIG_GUIDE.md" ]] && command -v python3 >/dev/null 2>&1; then
+  echo "[4/4] Syncing doc/HMA_DOCKER_AND_CONFIG_GUIDE.md to Docker Hub Overview..."
+  python3 - <<'PY' || echo "Warning: could not update Docker Hub description via API (requires password or full-access PAT)"
+import json, os, ssl, urllib.request
+
+ctx = ssl.create_default_context(cafile="/etc/ssl/cert.pem") if os.path.exists("/etc/ssl/cert.pem") else ssl.create_default_context()
+user = os.environ["DOCKERHUB_USERNAME"]
+token = os.environ["DOCKERHUB_TOKEN"]
+repo = os.environ.get("DOCKERHUB_REPO", f"{user}/cassandra-hma")
+with open("doc/HMA_DOCKER_AND_CONFIG_GUIDE.md", "r", encoding="utf-8") as f:
+    readme = f.read()
+
+login_req = urllib.request.Request(
+    "https://hub.docker.com/v2/users/login/",
+    data=json.dumps({"username": user, "password": token}).encode("utf-8"),
+    headers={"Content-Type": "application/json"},
+    method="POST",
+)
+with urllib.request.urlopen(login_req, timeout=15, context=ctx) as resp:
+    jwt = json.loads(resp.read().decode("utf-8"))["token"]
+
+patch_req = urllib.request.Request(
+    f"https://hub.docker.com/v2/repositories/{repo}/",
+    data=json.dumps({
+        "description": "Apache Cassandra 7.0 HMA (Aerospike-Inspired Hybrid Memory Architecture & Fast-CAS Engine)",
+        "full_description": readme,
+    }).encode("utf-8"),
+    headers={
+        "Content-Type": "application/json",
+        "Authorization": f"JWT {jwt}",
+    },
+    method="PATCH",
+)
+with urllib.request.urlopen(patch_req, timeout=15, context=ctx) as resp:
+    print(f"Docker Hub Overview updated (HTTP {resp.status}).")
+PY
+fi
+
 echo "Successfully pushed:"
 echo "  - ${IMAGE_REPO}:${VERSION_TAG}"
 echo "  - ${IMAGE_REPO}:${EXTRA_TAG}"
