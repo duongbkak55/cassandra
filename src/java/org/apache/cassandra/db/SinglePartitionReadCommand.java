@@ -857,7 +857,8 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
                     {
                         for (int i = 0, n = view.sstables.size(); i < n; i++)
                         {
-                            if (HMARecordPointer.resolveSSTableId(view.sstables.get(i).descriptor) == candidate.sstableId)
+                            SSTableReader r = view.sstables.get(i);
+                            if (HMARecordPointer.resolveSSTableId(r.descriptor) == candidate.sstableId && containsKeyRange(r))
                             {
                                 hmaPtr = candidate;
                                 hmaSingleTarget = true;
@@ -872,7 +873,10 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
                         boolean foundBase = false;
                         for (int i = 0, n = view.sstables.size(); i < n; i++)
                         {
-                            long sid = HMARecordPointer.resolveSSTableId(view.sstables.get(i).descriptor);
+                            SSTableReader r = view.sstables.get(i);
+                            if (!containsKeyRange(r))
+                                continue;
+                            long sid = HMARecordPointer.resolveSSTableId(r.descriptor);
                             if (sid == candidate.sstableId)
                                 foundPrimary = true;
                             else if (candidate.firstDeltaSstableId > 0 && sid == candidate.firstDeltaSstableId)
@@ -901,6 +905,8 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
                 hmaIndex.setThreadLocalLookupHint(partitionKey(), hmaPtr);
 
             try
+            {
+            for (int hmaPass = 0; hmaPass < 2; hmaPass++)
             {
             for (SSTableReader sstable : view.sstables)
             {
@@ -965,6 +971,12 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
                                                                     columnFilter(),
                                                                     filter.isReversed(),
                                                                     metricsCollector);
+                        if (iter.isEmpty())
+                        {
+                            iter.close();
+                            nonIntersectingSSTables++;
+                            continue;
+                        }
                     }
                     else
                     {
@@ -1011,6 +1023,14 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
                     }
                 }
             }
+            if (hmaPtr == null || !inputCollector.isEmpty())
+                break;
+            HMAPrimaryIndex.clearThreadLocalLookupHint();
+            hmaPtr = null;
+            hmaSingleTarget = false;
+            hmaTwoTarget = false;
+            hmaThreeTarget = false;
+            }
             }
             finally
             {
@@ -1054,6 +1074,12 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
     protected boolean intersects(SSTableReader sstable)
     {
         return clusteringIndexFilter().intersects(sstable.metadata().comparator, sstable.getSSTableMetadata().coveredClustering);
+    }
+
+    private boolean containsKeyRange(SSTableReader sstable)
+    {
+        DecoratedKey key = partitionKey();
+        return sstable.getFirst().compareTo(key) <= 0 && sstable.getLast().compareTo(key) >= 0;
     }
 
     private UnfilteredRowIteratorWithLowerBound makeRowIteratorWithLowerBound(ColumnFamilyStore cfs,
@@ -1215,7 +1241,8 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
                 {
                     for (int i = 0, n = view.sstables.size(); i < n; i++)
                     {
-                        if (HMARecordPointer.resolveSSTableId(view.sstables.get(i).descriptor) == candidate.sstableId)
+                        SSTableReader r = view.sstables.get(i);
+                        if (HMARecordPointer.resolveSSTableId(r.descriptor) == candidate.sstableId && containsKeyRange(r))
                         {
                             hmaPtr = candidate;
                             hmaSingleTarget = true;
@@ -1230,7 +1257,10 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
                     boolean foundBase = false;
                     for (int i = 0, n = view.sstables.size(); i < n; i++)
                     {
-                        long sid = HMARecordPointer.resolveSSTableId(view.sstables.get(i).descriptor);
+                        SSTableReader r = view.sstables.get(i);
+                        if (!containsKeyRange(r))
+                            continue;
+                        long sid = HMARecordPointer.resolveSSTableId(r.descriptor);
                         if (sid == candidate.sstableId)
                             foundPrimary = true;
                         else if (candidate.firstDeltaSstableId > 0 && sid == candidate.firstDeltaSstableId)
@@ -1255,8 +1285,15 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
             }
         }
 
+        if (hmaPtr != null)
+            hmaIndex.setThreadLocalLookupHint(partitionKey(), hmaPtr);
+
         // read sorted sstables
         boolean stoppedEarlyByReduceFilter = false;
+        try
+        {
+        for (int hmaPass = 0; hmaPass < 2; hmaPass++)
+        {
         for (int sstableIdx = 0, sstableCount = view.sstables.size(); sstableIdx < sstableCount; sstableIdx++)
         {
             SSTableReader sstable = view.sstables.get(sstableIdx);
@@ -1351,6 +1388,22 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
                              sstable.isRepaired(),
                              controller);
             }
+        }
+        if (hmaPtr == null || (result != null && !result.isEmpty()))
+            break;
+        HMAPrimaryIndex.clearThreadLocalLookupHint();
+        hmaPtr = null;
+        hmaSingleTarget = false;
+        hmaTwoTarget = false;
+        hmaThreeTarget = false;
+        stoppedEarlyByReduceFilter = false;
+        filter = (ClusteringIndexNamesFilter) clusteringIndexFilter();
+        }
+        }
+        finally
+        {
+            if (hmaPtr != null)
+                HMAPrimaryIndex.clearThreadLocalLookupHint();
         }
 
         cfs.metric.updateSSTableIterated(metricsCollector.getMergedSSTables());
